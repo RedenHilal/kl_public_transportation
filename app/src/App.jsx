@@ -1,122 +1,296 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import maplibregl from 'maplibre-gl';
+import Map, { Source, Layer, Popup } from 'react-map-gl/maplibre';
+import Sidebar from './components/Sidebar';
+import Legend from './components/Legend';
+import useRealtimeBuses from './hooks/useRealtimeBuses';
+import 'maplibre-gl/dist/maplibre-gl.css';
+import './App.css';
+
+const INTERACTIVE_LAYERS = [
+  'rail-lines', 'bus-routes', 'mrt-feeder-routes',
+  'rail-stops', 'bus-stops', 'mrt-feeder-stops', 'ktmb-stops',
+  'realtime-bus',
+];
+
+const AGENCY_LABELS = {
+  'ktmb': 'KTM',
+  'rapid-rail': 'Rapid Rail',
+  'rapid-bus': 'Rapid Bus',
+  'rapid-mrt': 'MRT Feeder',
+};
+
+const LAYER_DEFS = [
+  { id: 'rail-lines', type: 'line', source: 'routes', sourceLayer: 'transit_routes',
+    filter: ['==', ['get', 'agency'], 'rapid-rail'],
+    paint: { 'line-color': ['coalesce', ['get', 'route_color'], '#e57200'], 'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2, 12, 4, 18, 7], 'line-opacity': 0.85 },
+    layout: { 'line-join': 'round', 'line-cap': 'round' } },
+  { id: 'bus-routes', type: 'line', source: 'routes', sourceLayer: 'transit_routes',
+    filter: ['==', ['get', 'agency'], 'rapid-bus'],
+    paint: { 'line-color': ['coalesce', ['get', 'route_color'], '#115740'], 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 13, 1.5, 18, 3], 'line-opacity': ['interpolate', ['linear'], ['zoom'], 10, 0.2, 14, 0.5, 18, 0.8] },
+    layout: { 'line-join': 'round', 'line-cap': 'round' } },
+  { id: 'mrt-feeder-routes', type: 'line', source: 'routes', sourceLayer: 'transit_routes',
+    filter: ['==', ['get', 'agency'], 'rapid-mrt'],
+    paint: { 'line-color': ['coalesce', ['get', 'route_color'], '#FFCD00'], 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 13, 1.5, 18, 3], 'line-opacity': ['interpolate', ['linear'], ['zoom'], 10, 0.2, 14, 0.5, 18, 0.8] },
+    layout: { 'line-join': 'round', 'line-cap': 'round' } },
+  { id: 'rail-stops', type: 'circle', source: 'stops', sourceLayer: 'transit_stops',
+    filter: ['==', ['get', 'agency'], 'rapid-rail'],
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 5, 18, 9], 'circle-color': '#D50032', 'circle-opacity': 0.85, 'circle-stroke-width': 1, 'circle-stroke-color': '#fff' } },
+  { id: 'bus-stops', type: 'circle', source: 'stops', sourceLayer: 'transit_stops',
+    filter: ['==', ['get', 'agency'], 'rapid-bus'], minzoom: 13,
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 1.5, 16, 4, 18, 6], 'circle-color': '#2E8B57', 'circle-opacity': 0.6 } },
+  { id: 'mrt-feeder-stops', type: 'circle', source: 'stops', sourceLayer: 'transit_stops',
+    filter: ['==', ['get', 'agency'], 'rapid-mrt'], minzoom: 13,
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 1.5, 16, 4, 18, 6], 'circle-color': '#DAA520', 'circle-opacity': 0.6 } },
+  { id: 'ktmb-stops', type: 'circle', source: 'stops', sourceLayer: 'transit_stops',
+    filter: ['==', ['get', 'agency'], 'ktmb'],
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2, 14, 5, 18, 9], 'circle-color': '#1964B7', 'circle-opacity': 0.85, 'circle-stroke-width': 1, 'circle-stroke-color': '#fff' } },
+];
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem('transit-theme') === 'dark');
+  const [realtimeEnabled, setRealtimeEnabled] = useState(false);
+  const [popupInfo, setPopupInfo] = useState(null);
+  const [mobileExpanded, setMobileExpanded] = useState(false);
+  const [nearbyStops, setNearbyStops] = useState(null);
+  const [visibility, setVisibility] = useState(() => {
+    const v = {};
+    LAYER_DEFS.forEach(l => { v[l.id] = true; });
+    v['realtime-bus'] = false;
+    v['realtime-bus-dir'] = false;
+    return v;
+  });
+
+  const mapInstanceRef = useRef(null);
+
+  const { data: busData, status, busCount, lastUpdate } = useRealtimeBuses(realtimeEnabled);
+
+  const toggleLayer = useCallback((layerId, isRealtime, checked) => {
+    if (isRealtime) {
+      setRealtimeEnabled(checked);
+    }
+    setVisibility(prev => {
+      const next = { ...prev, [layerId]: checked };
+      if (layerId === 'realtime-bus') {
+        next['realtime-bus-dir'] = checked;
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleDark = useCallback(() => {
+    setDarkMode(prev => {
+      const next = !prev;
+      localStorage.setItem('transit-theme', next ? 'dark' : 'light');
+      return next;
+    });
+  }, []);
+
+  const handleLocate = useCallback(() => {
+    if (!navigator.geolocation) return;
+    const map = mapInstanceRef.current;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude } = pos.coords;
+        map?.flyTo({ center: [longitude, latitude], zoom: 14 });
+        setTimeout(() => findNearbyStops(map, latitude, longitude), 500);
+      },
+      () => {},
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  }, []);
+
+  function findNearbyStops(map, lat, lng) {
+    if (!map) return;
+    const features = map.queryRenderedFeatures({ layers: ['rail-stops', 'bus-stops', 'mrt-feeder-stops', 'ktmb-stops'] });
+    const stops = features.map(f => {
+      const [flng, flat] = f.geometry.coordinates;
+      const dist = getDist(lat, lng, flat, flng);
+      return { ...f.properties, lon: flng, lat: flat, dist };
+    }).sort((a, b) => a.dist - b.dist).slice(0, 5);
+    setNearbyStops(stops);
+  }
+
+  const handleNearbyStopClick = useCallback((stop) => {
+    mapInstanceRef.current?.flyTo({ center: [stop.lon, stop.lat], zoom: 17 });
+  }, []);
+
+  const handleSearch = useCallback((query) => {
+    if (!query || query.length < 2) return;
+    const map = mapInstanceRef.current;
+    if (!map) return;
+    const q = query.toLowerCase();
+    const features = map.queryRenderedFeatures({ layers: ['rail-stops', 'bus-stops', 'mrt-feeder-stops', 'ktmb-stops'] });
+    const results = features
+      .filter(f => f.properties.stop_name?.toLowerCase().includes(q))
+      .slice(0, 8);
+    // Render results in the search-results div
+    const el = document.getElementById('search-results');
+    if (el) {
+      el.innerHTML = '';
+      el.classList.add('show');
+      results.forEach(f => {
+        const div = document.createElement('div');
+        div.className = 'search-item';
+        div.innerHTML = `<span class="name">${f.properties.stop_name}</span><span class="meta">${AGENCY_LABELS[f.properties.agency] || ''}</span>`;
+        div.addEventListener('click', () => {
+          mapInstanceRef.current?.flyTo({ center: f.geometry.coordinates, zoom: 17 });
+          el.classList.remove('show');
+          document.getElementById('search-input').value = '';
+        });
+        el.appendChild(div);
+      });
+      if (results.length === 0) {
+        el.innerHTML = '<div class="search-item" style="text-align:center;color:var(--text-muted);">No results</div>';
+      }
+    }
+  }, []);
+
+  const handleMapClick = useCallback((e) => {
+    if (!e.features || e.features.length === 0) { setPopupInfo(null); return; }
+    const feature = e.features[0];
+    const props = feature.properties;
+    const layerId = feature.layer?.id;
+
+    let html = '';
+    if (layerId === 'realtime-bus') {
+      const speed = props.speed != null ? (props.speed * 3.6).toFixed(1) + ' km/h' : 'N/A';
+      const updated = props.timestamp ? new Date(props.timestamp * 1000).toLocaleTimeString() : '';
+      html = `<strong>${props.vehicleId || 'Bus'} #${props.vehicleLabel || ''}</strong>
+        <span class="popup-agency">Live Vehicle</span>
+        <span>Route: ${props.routeId || 'N/A'} &#8226; ${speed}</span>
+        ${updated ? `<span style="font-size:10px;color:var(--text-muted);">Updated: ${updated}</span>` : ''}`;
+    } else if (layerId?.includes('stops')) {
+      const agency = AGENCY_LABELS[props.agency] || '';
+      html = `<strong>${props.stop_name || 'Unnamed'}</strong>`;
+      if (agency) html += `<span class="popup-agency">${agency}</span>`;
+      if (props.stop_code) html += `<span>Code: ${props.stop_code}</span>`;
+      if (props.routes) html += `<div class="popup-detail"><span class="popup-badge">${props.routes}</span></div>`;
+    } else if (layerId?.includes('routes') || layerId === 'rail-lines') {
+      html = `<strong>${props.route_short_name || '?'}</strong>
+        <span class="popup-agency">${AGENCY_LABELS[props.agency] || ''} Route</span>
+        <span>${props.route_long_name || ''}</span>`;
+    }
+
+    if (html) setPopupInfo({ lngLat: e.lngLat, html });
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+  }, [darkMode]);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)');
+    const handler = (e) => setMobileExpanded(!e.matches);
+    mq.addEventListener('change', handler);
+    handler(mq);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+
+  const layerComponents = useMemo(() =>
+    LAYER_DEFS.map(l => (
+      <Layer key={l.id} {...l} layout={{ ...l.layout, visibility: visibility[l.id] ? 'visible' : 'none' }} />
+    )), [visibility]
+  );
 
   return (
     <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
+      <div id="loading-bar" className={status === 'loading' ? 'active' : ''} />
+
+      <Sidebar
+        onToggle={toggleLayer}
+        onSearch={handleSearch}
+        onLocate={handleLocate}
+        status={realtimeEnabled ? status : 'idle'}
+        busCount={busCount}
+        lastUpdate={lastUpdate}
+        nearbyStops={nearbyStops}
+        onNearbyStopClick={handleNearbyStopClick}
+        darkMode={darkMode}
+        onToggleDark={toggleDark}
+        onHeaderClick={() => setMobileExpanded(prev => !prev)}
+        mobileExpanded={mobileExpanded}
+      />
+
+      <div id="map-container">
+        <Map
+          onLoad={(e) => { mapInstanceRef.current = e.target; }}
+          mapLib={maplibregl}
+          initialViewState={{ longitude: 101.69, latitude: 3.14, zoom: 10.5 }}
+          mapStyle={{
+            version: 8,
+            sources: {
+              basemap: { type: 'raster', tiles: ['https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png'], tileSize: 256, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>' },
+            },
+            layers: [{ id: 'basemap-layer', type: 'raster', source: 'basemap' }],
+            glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+          }}
+          maxBounds={[[98.5, 0.5], [120, 7.5]]}
+          interactiveLayerIds={INTERACTIVE_LAYERS}
+          onClick={handleMapClick}
         >
-          Count is {count}
-        </button>
-      </section>
+          <Source id="routes" type="vector" tiles={['http://yuellen.my.id/martin/transit_routes/{z}/{x}/{y}']} minzoom={6} maxzoom={20} />
+          <Source id="stops" type="vector" tiles={['http://yuellen.my.id/martin/transit_stops/{z}/{x}/{y}']} minzoom={8} maxzoom={20} />
 
-      <div className="ticks"></div>
+          <Source id="bus-realtime" type="geojson" data={busData}>
+            <Layer
+              id="realtime-bus"
+              type="circle"
+              paint={{
+                'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 15, 6, 18, 10],
+                'circle-color': '#0078D4',
+                'circle-opacity': 0.9,
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#ffffff',
+              }}
+              layout={{ visibility: visibility['realtime-bus'] ? 'visible' : 'none' }}
+            />
+            <Layer
+              id="realtime-bus-dir"
+              type="symbol"
+              filter={['has', 'bearing']}
+              paint={{
+                'text-color': '#ffffff',
+                'text-halo-color': '#0078D4',
+                'text-halo-width': 1,
+              }}
+              layout={{
+                visibility: visibility['realtime-bus-dir'] ? 'visible' : 'none',
+                'text-field': '▲',
+                'text-size': ['interpolate', ['linear'], ['zoom'], 12, 8, 15, 12, 18, 16],
+                'text-allow-overlap': true,
+                'text-ignore-placement': true,
+                'text-rotate': ['get', 'bearing'],
+              }}
+            />
+          </Source>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+          {layerComponents}
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
+          {popupInfo && (
+            <Popup
+              longitude={popupInfo.lngLat.lng}
+              latitude={popupInfo.lngLat.lat}
+              onClose={() => setPopupInfo(null)}
+              anchor="top"
+            >
+              <div dangerouslySetInnerHTML={{ __html: popupInfo.html }} />
+            </Popup>
+          )}
+        </Map>
+      </div>
+
+      <Legend />
     </>
-  )
+  );
 }
 
-export default App
+function getDist(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+export default App;
