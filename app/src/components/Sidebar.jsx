@@ -19,9 +19,11 @@ const SECTIONS = [
     ],
   },
   {
-    title: 'Realtime',
+    title: 'Live Vehicles',
     items: [
-      { id: 'realtime-bus', toggleId: 'toggle-realtime-bus', label: 'Live Bus Positions', swatch: '#0078D4', type: 'dot', checked: false },
+      { id: 'realtime-ktmb', toggleId: 'toggle-realtime-ktmb', label: 'KTMB Trains', swatch: '#1964B7', type: 'dot', checked: false },
+      { id: 'realtime-rapid-bus', toggleId: 'toggle-realtime-rapid-bus', label: 'Rapid Bus', swatch: '#0078D4', type: 'dot', checked: false },
+      { id: 'realtime-mrt-feeder', toggleId: 'toggle-realtime-mrt-feeder', label: 'MRT Feeder', swatch: '#FFCD00', type: 'dot', checked: false },
     ],
   },
 ];
@@ -30,9 +32,6 @@ function Sidebar({
   onToggle,
   onSearch,
   onLocate,
-  status,
-  busCount,
-  lastUpdate,
   nearbyStops,
   onNearbyStopClick,
   darkMode,
@@ -62,8 +61,6 @@ function Sidebar({
           <div id="search-results"></div>
         </div>
 
-        <StatusBar status={status} busCount={busCount} lastUpdate={lastUpdate} />
-
         <div id="layer-toggles">
           {SECTIONS.map((section, i) => (
             <div key={section.title}>
@@ -91,25 +88,6 @@ function Sidebar({
 
         <NearbyStops stops={nearbyStops} onStopClick={onNearbyStopClick} />
       </div>
-    </div>
-  );
-}
-
-function StatusBar({ status, busCount, lastUpdate }) {
-  const labels = {
-    idle: 'Real-time: paused',
-    online: 'Live: active',
-    empty: 'Live: no buses right now',
-    offline: 'Real-time unavailable',
-  };
-  const dotClass = status === 'online' ? 'online' : status === 'empty' ? 'warning' : status === 'offline' ? '' : 'warning';
-  const timeStr = lastUpdate ? lastUpdate.toLocaleTimeString() : '';
-  return (
-    <div id="status-bar">
-      <div className={`status-dot ${dotClass}`} />
-      <span id="status-text">{labels[status] || labels.idle}</span>
-      {busCount > 0 && <span id="bus-count">{busCount} bus{busCount !== 1 ? 'es' : ''}</span>}
-      {timeStr && <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{timeStr}</span>}
     </div>
   );
 }

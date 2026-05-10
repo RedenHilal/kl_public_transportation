@@ -6,7 +6,9 @@ const LEGEND_ITEMS = [
   { type: 'line', color: '#FFCD00', label: 'MRT Feeder' },
   { type: 'dot', color: '#D50032', label: 'Rail Station' },
   { type: 'dot', color: '#1964B7', label: 'KTM Station' },
-  { type: 'dot', color: '#0078D4', label: 'Live Bus', size: '8px' },
+  { type: 'dot', color: '#1964B7', label: 'KTMB Train', size: '8px' },
+  { type: 'dot', color: '#0078D4', label: 'Rapid Bus', size: '8px' },
+  { type: 'dot', color: '#FFCD00', label: 'MRT Feeder', size: '8px' },
 ];
 
 function Legend() {

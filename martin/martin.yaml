@@ -18,3 +18,10 @@ postgres:
         geometry_type: POINT
         srid: 4326
         id_column: stop_id
+      realtime_vehicle_positions:
+        schema: public
+        table: realtime_vehicle_positions
+        geometry_column: geom
+        geometry_type: POINT
+        srid: 4326
+        id_column: id

@@ -3,14 +3,13 @@ import maplibregl from 'maplibre-gl';
 import Map, { Source, Layer, Popup } from 'react-map-gl/maplibre';
 import Sidebar from './components/Sidebar';
 import Legend from './components/Legend';
-import useRealtimeBuses from './hooks/useRealtimeBuses';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './App.css';
 
 const INTERACTIVE_LAYERS = [
   'rail-lines', 'bus-routes', 'mrt-feeder-routes',
   'rail-stops', 'bus-stops', 'mrt-feeder-stops', 'ktmb-stops',
-  'realtime-bus',
+  'realtime-ktmb', 'realtime-rapid-bus', 'realtime-mrt-feeder',
 ];
 
 const AGENCY_LABELS = {
@@ -56,14 +55,16 @@ function App() {
   const [visibility, setVisibility] = useState(() => {
     const v = {};
     LAYER_DEFS.forEach(l => { v[l.id] = true; });
-    v['realtime-bus'] = false;
-    v['realtime-bus-dir'] = false;
+    v['realtime-ktmb'] = false;
+    v['realtime-ktmb-dir'] = false;
+    v['realtime-rapid-bus'] = false;
+    v['realtime-rapid-bus-dir'] = false;
+    v['realtime-mrt-feeder'] = false;
+    v['realtime-mrt-feeder-dir'] = false;
     return v;
   });
 
   const mapInstanceRef = useRef(null);
-
-  const { data: busData, status, busCount, lastUpdate } = useRealtimeBuses(realtimeEnabled);
 
   const toggleLayer = useCallback((layerId, isRealtime, checked) => {
     if (isRealtime) {
@@ -71,8 +72,10 @@ function App() {
     }
     setVisibility(prev => {
       const next = { ...prev, [layerId]: checked };
-      if (layerId === 'realtime-bus') {
-        next['realtime-bus-dir'] = checked;
+      if (isRealtime) {
+        next['realtime-ktmb-dir'] = checked;
+        next['realtime-rapid-bus-dir'] = checked;
+        next['realtime-mrt-feeder-dir'] = checked;
       }
       return next;
     });
@@ -161,12 +164,13 @@ function App() {
     const layerId = feature.layer?.id;
 
     let html = '';
-    if (layerId === 'realtime-bus') {
+    if (layerId?.startsWith('realtime-')) {
       const speed = props.speed != null ? (props.speed * 3.6).toFixed(1) + ' km/h' : 'N/A';
       const updated = props.timestamp ? new Date(props.timestamp * 1000).toLocaleTimeString() : '';
-      html = `<strong>${props.vehicleId || 'Bus'} #${props.vehicleLabel || ''}</strong>
-        <span class="popup-agency">Live Vehicle</span>
-        <span>Route: ${props.routeId || 'N/A'} &#8226; ${speed}</span>
+      const agencyLabel = AGENCY_LABELS[props.agency_name] || 'Live Vehicle';
+      html = `<strong>${props.vehicle_id || 'Vehicle'} #${props.vehicle_label || ''}</strong>
+        <span class="popup-agency">${agencyLabel}</span>
+        <span>Route: ${props.route_id || 'N/A'} &#8226; ${speed}</span>
         ${updated ? `<span style="font-size:10px;color:var(--text-muted);">Updated: ${updated}</span>` : ''}`;
     } else if (layerId?.includes('stops')) {
       const agency = AGENCY_LABELS[props.agency] || '';
@@ -195,6 +199,19 @@ function App() {
     return () => mq.removeEventListener('change', handler);
   }, []);
 
+  const mapStyle = useMemo(() => ({
+    version: 8,
+    sources: {
+      basemap: { type: 'raster', tiles: ['https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png'], tileSize: 256, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>' },
+    },
+    layers: [{ id: 'basemap-layer', type: 'raster', source: 'basemap' }],
+    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+  }), []);
+
+  const handleMapLoad = useCallback((e) => {
+    mapInstanceRef.current = e.target;
+  }, []);
+
   const layerComponents = useMemo(() =>
     LAYER_DEFS.map(l => (
       <Layer key={l.id} {...l} layout={{ ...l.layout, visibility: visibility[l.id] ? 'visible' : 'none' }} />
@@ -203,15 +220,10 @@ function App() {
 
   return (
     <>
-      <div id="loading-bar" className={status === 'loading' ? 'active' : ''} />
-
       <Sidebar
         onToggle={toggleLayer}
         onSearch={handleSearch}
         onLocate={handleLocate}
-        status={realtimeEnabled ? status : 'idle'}
-        busCount={busCount}
-        lastUpdate={lastUpdate}
         nearbyStops={nearbyStops}
         onNearbyStopClick={handleNearbyStopClick}
         darkMode={darkMode}
@@ -222,17 +234,10 @@ function App() {
 
       <div id="map-container">
         <Map
-          onLoad={(e) => { mapInstanceRef.current = e.target; }}
+          onLoad={handleMapLoad}
           mapLib={maplibregl}
           initialViewState={{ longitude: 101.69, latitude: 3.14, zoom: 10.5 }}
-          mapStyle={{
-            version: 8,
-            sources: {
-              basemap: { type: 'raster', tiles: ['https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png'], tileSize: 256, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>' },
-            },
-            layers: [{ id: 'basemap-layer', type: 'raster', source: 'basemap' }],
-            glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
-          }}
+          mapStyle={mapStyle}
           maxBounds={[[98.5, 0.5], [120, 7.5]]}
           interactiveLayerIds={INTERACTIVE_LAYERS}
           onClick={handleMapClick}
@@ -240,10 +245,45 @@ function App() {
           <Source id="routes" type="vector" tiles={['https://yuellen.my.id/martin/transit_routes/{z}/{x}/{y}']} minzoom={6} maxzoom={20} />
           <Source id="stops" type="vector" tiles={['https://yuellen.my.id/martin/transit_stops/{z}/{x}/{y}']} minzoom={8} maxzoom={20} />
 
-          <Source id="bus-realtime" type="geojson" data={busData}>
+          <Source id="bus-realtime" type="vector" tiles={['https://yuellen.my.id/martin/realtime_vehicle_positions/{z}/{x}/{y}']} minzoom={6} maxzoom={20}>
             <Layer
-              id="realtime-bus"
+              id="realtime-ktmb"
               type="circle"
+              source-layer="realtime_vehicle_positions"
+              filter={['==', ['get', 'agency_name'], 'ktmb']}
+              paint={{
+                'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 4, 15, 7, 18, 12],
+                'circle-color': '#1964B7',
+                'circle-opacity': 0.9,
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#ffffff',
+              }}
+              layout={{ visibility: visibility['realtime-ktmb'] ? 'visible' : 'none' }}
+            />
+            <Layer
+              id="realtime-ktmb-dir"
+              type="symbol"
+              source-layer="realtime_vehicle_positions"
+              filter={['all', ['==', ['get', 'agency_name'], 'ktmb'], ['has', 'bearing']]}
+              paint={{
+                'text-color': '#ffffff',
+                'text-halo-color': '#1964B7',
+                'text-halo-width': 1,
+              }}
+              layout={{
+                visibility: visibility['realtime-ktmb-dir'] ? 'visible' : 'none',
+                'text-field': '▲',
+                'text-size': ['interpolate', ['linear'], ['zoom'], 12, 10, 15, 14, 18, 20],
+                'text-allow-overlap': true,
+                'text-ignore-placement': true,
+                'text-rotate': ['get', 'bearing'],
+              }}
+            />
+            <Layer
+              id="realtime-rapid-bus"
+              type="circle"
+              source-layer="realtime_vehicle_positions"
+              filter={['==', ['get', 'agency_name'], 'rapid-bus']}
               paint={{
                 'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 15, 6, 18, 10],
                 'circle-color': '#0078D4',
@@ -251,19 +291,53 @@ function App() {
                 'circle-stroke-width': 2,
                 'circle-stroke-color': '#ffffff',
               }}
-              layout={{ visibility: visibility['realtime-bus'] ? 'visible' : 'none' }}
+              layout={{ visibility: visibility['realtime-rapid-bus'] ? 'visible' : 'none' }}
             />
             <Layer
-              id="realtime-bus-dir"
+              id="realtime-rapid-bus-dir"
               type="symbol"
-              filter={['has', 'bearing']}
+              source-layer="realtime_vehicle_positions"
+              filter={['all', ['==', ['get', 'agency_name'], 'rapid-bus'], ['has', 'bearing']]}
               paint={{
                 'text-color': '#ffffff',
                 'text-halo-color': '#0078D4',
                 'text-halo-width': 1,
               }}
               layout={{
-                visibility: visibility['realtime-bus-dir'] ? 'visible' : 'none',
+                visibility: visibility['realtime-rapid-bus-dir'] ? 'visible' : 'none',
+                'text-field': '▲',
+                'text-size': ['interpolate', ['linear'], ['zoom'], 12, 8, 15, 12, 18, 16],
+                'text-allow-overlap': true,
+                'text-ignore-placement': true,
+                'text-rotate': ['get', 'bearing'],
+              }}
+            />
+            <Layer
+              id="realtime-mrt-feeder"
+              type="circle"
+              source-layer="realtime_vehicle_positions"
+              filter={['==', ['get', 'agency_name'], 'rapid-mrt']}
+              paint={{
+                'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 15, 6, 18, 10],
+                'circle-color': '#FFCD00',
+                'circle-opacity': 0.9,
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#333333',
+              }}
+              layout={{ visibility: visibility['realtime-mrt-feeder'] ? 'visible' : 'none' }}
+            />
+            <Layer
+              id="realtime-mrt-feeder-dir"
+              type="symbol"
+              source-layer="realtime_vehicle_positions"
+              filter={['all', ['==', ['get', 'agency_name'], 'rapid-mrt'], ['has', 'bearing']]}
+              paint={{
+                'text-color': '#333333',
+                'text-halo-color': '#FFCD00',
+                'text-halo-width': 1,
+              }}
+              layout={{
+                visibility: visibility['realtime-mrt-feeder-dir'] ? 'visible' : 'none',
                 'text-field': '▲',
                 'text-size': ['interpolate', ['linear'], ['zoom'], 12, 8, 15, 12, 18, 16],
                 'text-allow-overlap': true,

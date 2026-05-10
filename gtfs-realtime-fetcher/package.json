@@ -1,0 +1,10 @@
+{
+  "name": "gtfs-realtime-fetcher",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "protobufjs": "^8.0.3",
+    "pg": "^8.13.1"
+  }
+}

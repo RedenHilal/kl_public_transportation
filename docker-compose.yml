@@ -17,10 +17,18 @@ services:
         exec /usr/local/bin/martin --config /tmp/martin.yaml --webui enable-for-all
     stop_grace_period: 10s
 
+  gtfs-rt-fetcher:
+    build: ./gtfs-realtime-fetcher
+    container_name: gtfs-rt-fetcher
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+    stop_grace_period: 10s
+
   web:
     image: nginx:alpine
     volumes:
-      - ./app:/usr/share/nginx/html
+      - ./app/dist:/usr/share/nginx/html
     pull_policy: build
     container_name: transit-web
     restart: unless-stopped
