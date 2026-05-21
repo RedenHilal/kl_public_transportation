@@ -18,3 +18,7 @@ postgres:
         geometry_type: POINT
         srid: 4326
         id_column: stop_id
+  functions:
+    get_realtime_geojson:
+      schema: public
+      function: get_realtime_geojson
