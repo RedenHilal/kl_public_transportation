@@ -1,34 +1,28 @@
 import { Source, Layer } from 'react-map-gl/maplibre';
 import { useState, useEffect } from 'react';
-import { MARTIN_URL } from '../../constants/config';
+import { REALTIME_URL } from '../../constants/config';
 
+const EMPTY = { type: 'FeatureCollection', features: [] };
+
+// Renders the live vehicle fleet as a SINGLE GeoJSON source (not vector tiles).
+// One fetch of the whole fleet (~120 small points) means every vehicle is drawn
+// from the same snapshot at every zoom level — no per-zoom tile generations, no
+// tile-boundary flicker, and no double-buffer needed. Refetched whenever
+// `refreshKey` changes (the parent ticks it every 15s).
 export function RealtimeLayers({ visibility, refreshKey }) {
-  // Use double buffering (Source A and Source B) to prevent flickering
-  const [activeBuffer, setActiveBuffer] = useState('A');
-  const [bufferUrls, setBufferUrls] = useState({
-    A: `${MARTIN_URL}/realtime_vehicles_with_stops/{z}/{x}/{y}?t=${Date.now()}`,
-    B: `${MARTIN_URL}/realtime_vehicles_with_stops/{z}/{x}/{y}?t=${Date.now()}`
-  });
+  const [data, setData] = useState(EMPTY);
 
   useEffect(() => {
-    // When refreshKey changes, update the HIDDEN buffer
-    const nextBuffer = activeBuffer === 'A' ? 'B' : 'A';
-    setBufferUrls(prev => ({
-      ...prev,
-      [nextBuffer]: `${MARTIN_URL}/realtime_vehicles_with_stops/{z}/{x}/{y}?t=${refreshKey}`
-    }));
-
-    // Wait a short moment for the new tiles to start loading, then swap
-    // In a perfect world, we'd listen for the 'data' event, but a small delay
-    // is usually enough to ensure the transition is seamless.
-    const timer = setTimeout(() => {
-      setActiveBuffer(nextBuffer);
-    }, 1500); // 1.5s delay to allow new tiles to fetch in background
-
-    return () => clearTimeout(timer);
+    let cancelled = false;
+    fetch(`${REALTIME_URL}?t=${refreshKey}`)
+      .then((res) => (res.ok ? res.json() : EMPTY))
+      .then((geojson) => { if (!cancelled) setData(geojson && geojson.features ? geojson : EMPTY); })
+      .catch((err) => { console.warn('[realtime] fetch failed', err); });
+    return () => { cancelled = true; };
   }, [refreshKey]);
 
-  // Shared Paint Properties
+  const vis = (agencyId) => ({ visibility: visibility[agencyId] ? 'visible' : 'none' });
+
   const ktmbPaint = {
     'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 5, 15, 9],
     'circle-color': '#1964B7',
@@ -56,67 +50,41 @@ export function RealtimeLayers({ visibility, refreshKey }) {
     'text-halo-width': 1.5,
   };
 
-  // Helper to render a full set of layers for a buffer
-  const renderBuffer = (id) => {
-    const isVisible = activeBuffer === id;
-    const commonLayout = (agencyId) => ({
-      'visibility': (isVisible && visibility[agencyId]) ? 'visible' : 'none',
-    });
-
-    return (
-      <Source 
-        id={`realtime-${id}`} 
-        type="vector" 
-        tiles={[bufferUrls[id]]}
-        minzoom={6}
-        maxzoom={20}
-      >
-        <Layer
-          id={`realtime-ktmb-${id}`}
-          type="circle"
-          source-layer="realtime_vehicles_with_stops"
-          filter={['==', ['get', 'agency_name'], 'ktmb']}
-          layout={commonLayout('realtime-ktmb')}
-          paint={ktmbPaint}
-        />
-        <Layer
-          id={`realtime-rapid-bus-${id}`}
-          type="circle"
-          source-layer="realtime_vehicles_with_stops"
-          filter={['==', ['get', 'agency_name'], 'rapid-bus']}
-          layout={commonLayout('realtime-rapid-bus')}
-          paint={busPaint}
-        />
-        <Layer
-          id={`realtime-mrt-feeder-${id}`}
-          type="circle"
-          source-layer="realtime_vehicles_with_stops"
-          filter={['==', ['get', 'agency_name'], 'rapid-mrt']}
-          layout={commonLayout('realtime-mrt-feeder')}
-          paint={mrtPaint}
-        />
-        <Layer
-          id={`rt-labels-${id}`}
-          type="symbol"
-          source-layer="realtime_vehicles_with_stops"
-          minzoom={14}
-          layout={{
-            'text-field': ['concat', ['get', 'vehicle_label'], '\n', ['coalesce', ['get', 'next_stop_name'], '']],
-            'text-size': 10,
-            'text-offset': [0, 1.5],
-            'text-anchor': 'top',
-            'visibility': isVisible ? 'visible' : 'none'
-          }}
-          paint={labelPaint}
-        />
-      </Source>
-    );
-  };
-
   return (
-    <>
-      {renderBuffer('A')}
-      {renderBuffer('B')}
-    </>
+    <Source id="realtime" type="geojson" data={data}>
+      <Layer
+        id="realtime-ktmb"
+        type="circle"
+        filter={['==', ['get', 'agency_name'], 'ktmb']}
+        layout={vis('realtime-ktmb')}
+        paint={ktmbPaint}
+      />
+      <Layer
+        id="realtime-rapid-bus"
+        type="circle"
+        filter={['==', ['get', 'agency_name'], 'rapid-bus']}
+        layout={vis('realtime-rapid-bus')}
+        paint={busPaint}
+      />
+      <Layer
+        id="realtime-mrt-feeder"
+        type="circle"
+        filter={['==', ['get', 'agency_name'], 'rapid-mrt']}
+        layout={vis('realtime-mrt-feeder')}
+        paint={mrtPaint}
+      />
+      <Layer
+        id="rt-labels"
+        type="symbol"
+        minzoom={14}
+        layout={{
+          'text-field': ['concat', ['get', 'vehicle_label'], '\n', ['coalesce', ['get', 'next_stop_name'], '']],
+          'text-size': 10,
+          'text-offset': [0, 1.5],
+          'text-anchor': 'top',
+        }}
+        paint={labelPaint}
+      />
+    </Source>
   );
 }

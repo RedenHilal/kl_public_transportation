@@ -1,5 +1,6 @@
 import protobuf from 'protobufjs';
 import pg from 'pg';
+import http from 'http';
 
 const GTFS_RT_PROTO = `
 syntax = "proto2";
@@ -302,6 +303,34 @@ function scheduleNext(cycleStart) {
   const delay = Math.max(MIN_INTERVAL_MS, POLL_INTERVAL_MS - elapsed);
   setTimeout(pollCycle, delay);
 }
+
+// Lightweight HTTP endpoint that serves the whole live fleet as one GeoJSON
+// FeatureCollection (public.get_realtime_geojson). The frontend renders this as
+// a single GeoJSON source instead of vector tiles, so vehicle positions are
+// consistent across zoom levels and don't flicker on refresh.
+const HTTP_PORT = Number(process.env.HTTP_PORT) || 3001;
+const httpServer = http.createServer(async (req, res) => {
+  const url = (req.url || '').split('?')[0];
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+  if (req.method !== 'GET') { res.writeHead(405); res.end(); return; }
+
+  if (url === '/realtime.geojson') {
+    try {
+      const { rows } = await pool.query('SELECT public.get_realtime_geojson() AS fc');
+      res.writeHead(200, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(rows[0].fc));
+    } catch (err) {
+      console.error('[GTFS-RT] /realtime.geojson failed:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end('{"type":"FeatureCollection","features":[]}');
+    }
+    return;
+  }
+  if (url === '/healthz') { res.writeHead(200); res.end('ok'); return; }
+  res.writeHead(404); res.end('Not found');
+});
+httpServer.listen(HTTP_PORT, () => console.log(`[GTFS-RT] HTTP endpoint on :${HTTP_PORT} (/realtime.geojson)`));
 
 console.log('[GTFS-RT] Connecting to database...');
 pool.query('SELECT 1').then(() => {

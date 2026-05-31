@@ -249,9 +249,7 @@ function App() {
           maxBounds={[[98.5, 0.5], [120, 7.5]]}
           interactiveLayerIds={[
             ...INTERACTIVE_LAYERS,
-            'realtime-ktmb-A', 'realtime-ktmb-B',
-            'realtime-rapid-bus-A', 'realtime-rapid-bus-B',
-            'realtime-mrt-feeder-A', 'realtime-mrt-feeder-B'
+            'realtime-ktmb', 'realtime-rapid-bus', 'realtime-mrt-feeder'
           ]}
           onClick={handleMapClick}
         >

@@ -6,3 +6,11 @@
 //    deployed bundle keeps talking to the production tile server).
 export const MARTIN_URL =
   import.meta.env.VITE_MARTIN_URL ?? 'https://yuellen.my.id/martin';
+
+// Endpoint serving the whole live fleet as one GeoJSON FeatureCollection
+// (the gtfs-realtime-fetcher's /realtime.geojson). Rendered as a single
+// GeoJSON source so realtime vehicles stay consistent across zoom levels.
+// Prod: nginx proxies this path to the fetcher; dev points at it directly
+// via VITE_REALTIME_URL in app/.env.development.
+export const REALTIME_URL =
+  import.meta.env.VITE_REALTIME_URL ?? 'https://yuellen.my.id/realtime.geojson';
