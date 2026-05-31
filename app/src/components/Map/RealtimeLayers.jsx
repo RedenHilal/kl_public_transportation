@@ -1,26 +1,14 @@
 import { Source, Layer } from 'react-map-gl/maplibre';
-import { useState, useEffect } from 'react';
-import { REALTIME_URL } from '../../constants/config';
 
 const EMPTY = { type: 'FeatureCollection', features: [] };
 
 // Renders the live vehicle fleet as a SINGLE GeoJSON source (not vector tiles).
 // One fetch of the whole fleet (~120 small points) means every vehicle is drawn
 // from the same snapshot at every zoom level — no per-zoom tile generations, no
-// tile-boundary flicker, and no double-buffer needed. Refetched whenever
-// `refreshKey` changes (the parent ticks it every 15s).
-export function RealtimeLayers({ visibility, refreshKey }) {
-  const [data, setData] = useState(EMPTY);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`${REALTIME_URL}?t=${refreshKey}`)
-      .then((res) => (res.ok ? res.json() : EMPTY))
-      .then((geojson) => { if (!cancelled) setData(geojson && geojson.features ? geojson : EMPTY); })
-      .catch((err) => { console.warn('[realtime] fetch failed', err); });
-    return () => { cancelled = true; };
-  }, [refreshKey]);
-
+// tile-boundary flicker, and no double-buffer needed. The `data` FeatureCollection
+// is supplied by the parent (useRealtime hook).
+export function RealtimeLayers({ visibility, data }) {
+  const fc = data && data.features ? data : EMPTY;
   const vis = (agencyId) => ({ visibility: visibility[agencyId] ? 'visible' : 'none' });
 
   const ktmbPaint = {
@@ -51,7 +39,7 @@ export function RealtimeLayers({ visibility, refreshKey }) {
   };
 
   return (
-    <Source id="realtime" type="geojson" data={data}>
+    <Source id="realtime" type="geojson" data={fc}>
       <Layer
         id="realtime-ktmb"
         type="circle"

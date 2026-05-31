@@ -5,9 +5,18 @@ import Sidebar from './components/Sidebar';
 import Legend from './components/Legend';
 import { ServiceAlerts } from './components/ServiceAlerts';
 import { RealtimeLayers } from './components/Map/RealtimeLayers';
+import { Toast } from './components/Toast';
 import { useRouteMetadata } from './hooks/useRouteMetadata';
+import { useRealtime } from './hooks/useRealtime';
 import { LAYER_DEFS, INTERACTIVE_LAYERS, ASSET_MAP, AGENCY_LABELS } from './constants/transit';
 import { MARTIN_URL } from './constants/config';
+
+// Maps a realtime layer toggle id to its feed agency_name (for empty-feed toasts).
+const REALTIME_TOGGLE_AGENCY = {
+  'realtime-ktmb': 'ktmb',
+  'realtime-rapid-bus': 'rapid-bus',
+  'realtime-mrt-feeder': 'rapid-mrt',
+};
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './App.css';
 
@@ -33,17 +42,27 @@ function App() {
   const mapInstanceRef = useRef(null);
   const routeMetadata = useRouteMetadata(mapLoaded ? mapInstanceRef.current : null);
 
-  // Note: useRealtimeBuses might be legacy or used elsewhere, 
-  // but let's keep it if it was in the stashed version (it wasn't explicitly removed in the stash block I saw, but let's check)
-  // Actually, the stash block removed the call to useRealtimeBuses in the imports, but I should check if it's still used.
-  // In the "Stashed changes" block of imports, it was REMOVED.
-  // However, I see "const { data: busData, status, busCount, lastUpdate } = useRealtimeBuses(realtimeEnabled);" in the middle.
-  // I should probably remove it if I'm favoring the stash. 
-  // Wait, the "Stashed changes" block for imports didn't include useRealtimeBuses.
-  
+  // Live fleet GeoJSON + per-feed status (for empty/unavailable detection).
+  const { data: realtimeData, feeds: realtimeFeeds } = useRealtime(refreshKey);
+  const feedsRef = useRef([]);
+  useEffect(() => { feedsRef.current = realtimeFeeds; }, [realtimeFeeds]);
+  const [toast, setToast] = useState(null);
+
   const toggleLayer = useCallback((layerId, isRealtime, checked) => {
     if (isRealtime) setRealtimeEnabled(checked);
     setVisibility(prev => ({ ...prev, [layerId]: checked }));
+
+    // When a realtime layer is switched ON, warn if its upstream feed is empty/unavailable.
+    if (isRealtime && checked) {
+      const agency = REALTIME_TOGGLE_AGENCY[layerId];
+      const fs = feedsRef.current.find((f) => f.agency === agency);
+      const label = AGENCY_LABELS[agency] || 'This service';
+      if (fs && !fs.ok) {
+        setToast({ type: 'warn', message: `${label} live tracking is unavailable right now.` });
+      } else if (fs && fs.vehicles === 0) {
+        setToast({ type: 'info', message: `No live ${label} vehicles in the feed right now — the operator isn't broadcasting positions.` });
+      }
+    }
   }, []);
 
   const toggleDark = useCallback(() => {
@@ -257,7 +276,7 @@ function App() {
           <Source id="stops" type="vector" tiles={[`${MARTIN_URL}/transit_stops/{z}/{x}/{y}`]} minzoom={8} maxzoom={20} />
           
           {layerComponents}
-          <RealtimeLayers visibility={visibility} refreshKey={refreshKey} />
+          <RealtimeLayers visibility={visibility} data={realtimeData} />
 
           {popupInfo && (
             <Popup longitude={popupInfo.lngLat.lng} latitude={popupInfo.lngLat.lat} onClose={() => setPopupInfo(null)} anchor="top">
@@ -268,6 +287,7 @@ function App() {
       </div>
 
       <Legend routeMetadata={routeMetadata} visibility={visibility} />
+      <Toast toast={toast} onClose={() => setToast(null)} />
     </>
   );
 }

@@ -12,7 +12,8 @@ message FeedMessage {
 }
 message FeedHeader {
   required string gtfs_realtime_version = 1;
-  optional uint64 timestamp = 2;
+  optional int32 incrementality = 2;
+  optional uint64 timestamp = 3;
 }
 message FeedEntity {
   required string id = 1;
@@ -177,6 +178,14 @@ function decodeFeed(buffer, agency) {
   return vehicles;
 }
 
+// Per-feed status from the most recent poll, keyed by agency. Exposed on the
+// /realtime.geojson response so the UI can tell "feed is empty" (fresh header,
+// zero vehicles) apart from "feed unavailable" (fetch/decode failed).
+const feedStatus = {};
+function setFeedStatus(agency, fields) {
+  feedStatus[agency] = { agency, fetched_at: new Date().toISOString(), ...fields };
+}
+
 async function fetchEndpoint(endpoint) {
   try {
     const resp = await fetch(endpoint.url, {
@@ -185,20 +194,25 @@ async function fetchEndpoint(endpoint) {
 
     if (resp.status === 429) {
       console.warn(`[${endpoint.agency}] Rate limited (429), skipping cycle`);
+      setFeedStatus(endpoint.agency, { ok: false, error: 'rate_limited', vehicles: 0, feed_timestamp: null });
       return [];
     }
     if (!resp.ok) {
-      throw new Error(`[${endpoint.agency}] HTTP ${resp.status}`);
+      throw new Error(`HTTP ${resp.status}`);
     }
 
     const buffer = await resp.arrayBuffer();
+    const feed = FeedMessage.decode(new Uint8Array(buffer));
+    const feedTs = feed.header?.timestamp ? Number(feed.header.timestamp) : null;
     const vehicles = decodeFeed(buffer, endpoint.agency);
     console.log(
       `[${endpoint.agency}] ${vehicles.length} vehicles at ${new Date().toISOString()}`
     );
+    setFeedStatus(endpoint.agency, { ok: true, error: null, vehicles: vehicles.length, feed_timestamp: feedTs });
     return vehicles;
   } catch (e) {
     console.error(`[${endpoint.agency}] Vehicle fetch failed:`, e.message);
+    setFeedStatus(endpoint.agency, { ok: false, error: e.message, vehicles: 0, feed_timestamp: null });
     return [];
   }
 }
@@ -318,8 +332,12 @@ const httpServer = http.createServer(async (req, res) => {
   if (url === '/realtime.geojson') {
     try {
       const { rows } = await pool.query('SELECT public.get_realtime_geojson() AS fc');
+      const fc = rows[0].fc || { type: 'FeatureCollection', features: [] };
+      // Non-standard extra member; GeoJSON consumers ignore it, the UI reads it
+      // to surface empty/unavailable feeds.
+      fc.feeds = Object.values(feedStatus);
       res.writeHead(200, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify(rows[0].fc));
+      res.end(JSON.stringify(fc));
     } catch (err) {
       console.error('[GTFS-RT] /realtime.geojson failed:', err.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
