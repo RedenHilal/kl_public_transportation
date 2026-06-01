@@ -210,6 +210,53 @@ async function getKtmbTripRoutes() {
   return ktmbTripRoutes;
 }
 
+// Komuter stops that serve exactly one of the two Komuter lines (Port Klang /
+// Seremban). Used to resolve the line for live trains whose trip_id isn't in the
+// static feed: snap their position to the nearest single-line stop. Cached like
+// the trip map because the stops are static GTFS.
+let komuterStops = null;       // [{ lat, lng, line }]
+let komuterStopsAt = 0;
+async function getKomuterStops() {
+  if (komuterStops && Date.now() - komuterStopsAt < KTMB_ROUTES_TTL_MS) return komuterStops;
+  try {
+    const { rows } = await pool.query(
+      `WITH stop_lines AS (
+         SELECT DISTINCT st.stop_id, r.route_short_name AS line
+         FROM ktmb.stop_times st
+         JOIN ktmb.trips t ON t.trip_id = st.trip_id
+         JOIN ktmb.routes r ON r.route_id = t.route_id
+         WHERE r.route_short_name IN ('Port Klang Line', 'Seremban Line')
+       )
+       SELECT s.stop_id, sl.line,
+              ST_Y(s.stop_loc::geometry) AS lat,
+              ST_X(s.stop_loc::geometry) AS lng
+       FROM ktmb.stops s
+       JOIN stop_lines sl ON sl.stop_id = s.stop_id
+       WHERE (SELECT count(*) FROM stop_lines WHERE stop_id = s.stop_id) = 1`
+    );
+    komuterStops = rows.map((r) => ({ lat: Number(r.lat), lng: Number(r.lng), line: r.line }));
+    komuterStopsAt = Date.now();
+  } catch (err) {
+    console.error('[GTFS-RT] komuter stops lookup failed:', err.message);
+    if (!komuterStops) komuterStops = [];
+  }
+  return komuterStops;
+}
+
+// Simple planar nearest-neighbour (Klang Valley scale is small enough that
+// equirectangular with cos(lat) scaling is accurate for this purpose).
+const KL_COS = Math.cos((3.14 * Math.PI) / 180);
+function nearestStop(stops, lng, lat) {
+  let best = null, bestD2 = Infinity;
+  const kx = lng * KL_COS, ky = lat;
+  for (const s of stops) {
+    const dx = s.lng * KL_COS - kx, dy = s.lat - ky;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < bestD2) { bestD2 = d2; best = s; }
+  }
+  return best;
+}
+
 async function fetchEndpoint(endpoint) {
   try {
     const resp = await fetch(endpoint.url, {
@@ -365,6 +412,7 @@ const httpServer = http.createServer(async (req, res) => {
       // can show "Ipoh Line", the destination, etc. (partial — GTFS-RT includes
       // trips the static feed doesn't, which simply stay unresolved).
       const ktmbRoutes = await getKtmbTripRoutes();
+      const stops = await getKomuterStops();
       for (const f of fc.features || []) {
         const p = f.properties;
         if (p && p.agency_name === 'ktmb') {
@@ -373,9 +421,11 @@ const httpServer = http.createServer(async (req, res) => {
             p.route_short_name = line.short;
             p.route_long_name = line.long;
           } else if (/^(weekday|weekend|saturday|sunday)_/i.test(p.trip_id || '')) {
-            // Komuter trip missing from the static feed (live numbers outrun it).
-            // The service-day prefix still reliably marks it as KTM Komuter.
-            p.route_short_name = 'KTM Komuter';
+            // Komuter trip missing from the static feed — try to infer the
+            // line from the vehicle's nearest single-line Komuter stop.
+            const [lng, lat] = f.geometry.coordinates;
+            const nearest = nearestStop(stops, lng, lat);
+            p.route_short_name = nearest ? nearest.line : 'KTM Komuter';
           }
         }
       }
