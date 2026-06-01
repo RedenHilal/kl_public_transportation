@@ -57,12 +57,22 @@ services:
   web:
     image: nginx:alpine
     volumes:
-      - ./app:/usr/share/nginx/html
+      - ./app/dist:/usr/share/nginx/html
     pull_policy: build
     container_name: transit-web
     restart: unless-stopped
     ports:
       - "${WEB_PORT:-8000}:80"
+
+  gtfs-rt-fetcher:
+    build: ./gtfs-realtime-fetcher
+    container_name: gtfs-rt-fetcher
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+    ports:
+      - "8004:3001"
+    stop_grace_period: 10s
 
 volumes:
   # dev-only PostGIS data volume (used by the `db` service under the dev profile)

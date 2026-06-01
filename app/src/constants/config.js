@@ -13,15 +13,15 @@ export const MARTIN_URL =
 // Prod: nginx proxies this path to the fetcher; dev points at it directly
 // via VITE_REALTIME_URL in app/.env.development.
 export const REALTIME_URL =
-  import.meta.env.VITE_REALTIME_URL ?? 'https://yuellen.my.id/realtime.geojson';
+  import.meta.env.VITE_REALTIME_URL ?? 'https://yuellen.my.id/gis/fetch/realtime.geojson';
 
 // Next-departures lookup for Rapid Rail stops (the fetcher's /arrivals endpoint;
 // rail is frequency-based and has no live feed). Prod: nginx proxies this path to
 // the fetcher; dev points at it directly via VITE_ARRIVALS_URL in .env.development.
 export const ARRIVALS_URL =
-  import.meta.env.VITE_ARRIVALS_URL ?? 'https://yuellen.my.id/arrivals';
+  import.meta.env.VITE_ARRIVALS_URL ?? 'https://yuellen.my.id/gis/fetch/arrivals';
 
 // Full route geometry (GeoJSON) for a given agency+route, served by the fetcher.
 // Used to animate live vehicles along the route line instead of straight-line.
 export const ROUTE_URL =
-  import.meta.env.VITE_ROUTE_URL ?? 'https://yuellen.my.id/route_geojson';
+  import.meta.env.VITE_ROUTE_URL ?? 'https://yuellen.my.id/gis/fetch/route_geojson';

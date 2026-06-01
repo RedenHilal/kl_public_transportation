@@ -14,6 +14,7 @@ dist/
 *.njsproj
 *.sln
 *.sw?
+book
 
 node_modules/
 
