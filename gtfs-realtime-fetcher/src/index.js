@@ -1,5 +1,6 @@
 import protobuf from 'protobufjs';
 import pg from 'pg';
+import http from 'http';
 
 const GTFS_RT_PROTO = `
 syntax = "proto2";
@@ -11,7 +12,8 @@ message FeedMessage {
 }
 message FeedHeader {
   required string gtfs_realtime_version = 1;
-  optional uint64 timestamp = 2;
+  optional int32 incrementality = 2;
+  optional uint64 timestamp = 3;
 }
 message FeedEntity {
   required string id = 1;
@@ -176,6 +178,85 @@ function decodeFeed(buffer, agency) {
   return vehicles;
 }
 
+// Per-feed status from the most recent poll, keyed by agency. Exposed on the
+// /realtime.geojson response so the UI can tell "feed is empty" (fresh header,
+// zero vehicles) apart from "feed unavailable" (fetch/decode failed).
+const feedStatus = {};
+function setFeedStatus(agency, fields) {
+  feedStatus[agency] = { agency, fetched_at: new Date().toISOString(), ...fields };
+}
+
+// KTMB live vehicles carry no route_id, but their trip_id maps to a line via
+// ktmb.trips -> ktmb.routes. That data is static GTFS (tiny: ~300 trips, 9
+// routes), so cache the lookup and refresh occasionally to pick up a feed reload.
+const KTMB_ROUTES_TTL_MS = 30 * 60 * 1000;
+let ktmbTripRoutes = null;        // Map(trip_id -> { short, long })
+let ktmbTripRoutesAt = 0;
+async function getKtmbTripRoutes() {
+  if (ktmbTripRoutes && Date.now() - ktmbTripRoutesAt < KTMB_ROUTES_TTL_MS) return ktmbTripRoutes;
+  try {
+    const { rows } = await pool.query(
+      `SELECT t.trip_id, r.route_short_name, r.route_long_name
+         FROM ktmb.trips t JOIN ktmb.routes r ON r.route_id = t.route_id`
+    );
+    const map = new Map();
+    for (const row of rows) map.set(row.trip_id, { short: row.route_short_name, long: row.route_long_name });
+    ktmbTripRoutes = map;
+    ktmbTripRoutesAt = Date.now();
+  } catch (err) {
+    console.error('[GTFS-RT] ktmb trip->route lookup failed:', err.message);
+    if (!ktmbTripRoutes) ktmbTripRoutes = new Map(); // avoid retry storm; reuse last good otherwise
+  }
+  return ktmbTripRoutes;
+}
+
+// Komuter stops that serve exactly one of the two Komuter lines (Port Klang /
+// Seremban). Used to resolve the line for live trains whose trip_id isn't in the
+// static feed: snap their position to the nearest single-line stop. Cached like
+// the trip map because the stops are static GTFS.
+let komuterStops = null;       // [{ lat, lng, line }]
+let komuterStopsAt = 0;
+async function getKomuterStops() {
+  if (komuterStops && Date.now() - komuterStopsAt < KTMB_ROUTES_TTL_MS) return komuterStops;
+  try {
+    const { rows } = await pool.query(
+      `WITH stop_lines AS (
+         SELECT DISTINCT st.stop_id, r.route_short_name AS line
+         FROM ktmb.stop_times st
+         JOIN ktmb.trips t ON t.trip_id = st.trip_id
+         JOIN ktmb.routes r ON r.route_id = t.route_id
+         WHERE r.route_short_name IN ('Port Klang Line', 'Seremban Line')
+       )
+       SELECT s.stop_id, sl.line,
+              ST_Y(s.stop_loc::geometry) AS lat,
+              ST_X(s.stop_loc::geometry) AS lng
+       FROM ktmb.stops s
+       JOIN stop_lines sl ON sl.stop_id = s.stop_id
+       WHERE (SELECT count(*) FROM stop_lines WHERE stop_id = s.stop_id) = 1`
+    );
+    komuterStops = rows.map((r) => ({ lat: Number(r.lat), lng: Number(r.lng), line: r.line }));
+    komuterStopsAt = Date.now();
+  } catch (err) {
+    console.error('[GTFS-RT] komuter stops lookup failed:', err.message);
+    if (!komuterStops) komuterStops = [];
+  }
+  return komuterStops;
+}
+
+// Simple planar nearest-neighbour (Klang Valley scale is small enough that
+// equirectangular with cos(lat) scaling is accurate for this purpose).
+const KL_COS = Math.cos((3.14 * Math.PI) / 180);
+function nearestStop(stops, lng, lat) {
+  let best = null, bestD2 = Infinity;
+  const kx = lng * KL_COS, ky = lat;
+  for (const s of stops) {
+    const dx = s.lng * KL_COS - kx, dy = s.lat - ky;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < bestD2) { bestD2 = d2; best = s; }
+  }
+  return best;
+}
+
 async function fetchEndpoint(endpoint) {
   try {
     const resp = await fetch(endpoint.url, {
@@ -184,20 +265,25 @@ async function fetchEndpoint(endpoint) {
 
     if (resp.status === 429) {
       console.warn(`[${endpoint.agency}] Rate limited (429), skipping cycle`);
+      setFeedStatus(endpoint.agency, { ok: false, error: 'rate_limited', vehicles: 0, feed_timestamp: null });
       return [];
     }
     if (!resp.ok) {
-      throw new Error(`[${endpoint.agency}] HTTP ${resp.status}`);
+      throw new Error(`HTTP ${resp.status}`);
     }
 
     const buffer = await resp.arrayBuffer();
+    const feed = FeedMessage.decode(new Uint8Array(buffer));
+    const feedTs = feed.header?.timestamp ? Number(feed.header.timestamp) : null;
     const vehicles = decodeFeed(buffer, endpoint.agency);
     console.log(
       `[${endpoint.agency}] ${vehicles.length} vehicles at ${new Date().toISOString()}`
     );
+    setFeedStatus(endpoint.agency, { ok: true, error: null, vehicles: vehicles.length, feed_timestamp: feedTs });
     return vehicles;
   } catch (e) {
     console.error(`[${endpoint.agency}] Vehicle fetch failed:`, e.message);
+    setFeedStatus(endpoint.agency, { ok: false, error: e.message, vehicles: 0, feed_timestamp: null });
     return [];
   }
 }
@@ -302,6 +388,115 @@ function scheduleNext(cycleStart) {
   const delay = Math.max(MIN_INTERVAL_MS, POLL_INTERVAL_MS - elapsed);
   setTimeout(pollCycle, delay);
 }
+
+// Lightweight HTTP endpoint that serves the whole live fleet as one GeoJSON
+// FeatureCollection (public.get_realtime_geojson). The frontend renders this as
+// a single GeoJSON source instead of vector tiles, so vehicle positions are
+// consistent across zoom levels and don't flicker on refresh.
+// route geometry GeoJSON strings, keyed `${agency}::${route_short_name}` (static).
+const routeGeomCache = new Map();
+
+const HTTP_PORT = Number(process.env.HTTP_PORT) || 3001;
+const httpServer = http.createServer(async (req, res) => {
+  const url = (req.url || '').split('?')[0];
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+  if (req.method !== 'GET') { res.writeHead(405); res.end(); return; }
+
+  if (url === '/realtime.geojson') {
+    try {
+      const { rows } = await pool.query('SELECT public.get_realtime_geojson() AS fc');
+      const fc = rows[0].fc || { type: 'FeatureCollection', features: [] };
+
+      // KTMB trains have no route_id; resolve their line from trip_id so the UI
+      // can show "Ipoh Line", the destination, etc. (partial — GTFS-RT includes
+      // trips the static feed doesn't, which simply stay unresolved).
+      const ktmbRoutes = await getKtmbTripRoutes();
+      const stops = await getKomuterStops();
+      for (const f of fc.features || []) {
+        const p = f.properties;
+        if (p && p.agency_name === 'ktmb') {
+          const line = ktmbRoutes.get(p.trip_id);
+          if (line) {
+            p.route_short_name = line.short;
+            p.route_long_name = line.long;
+          } else if (/^(weekday|weekend|saturday|sunday)_/i.test(p.trip_id || '')) {
+            // Komuter trip missing from the static feed — try to infer the
+            // line from the vehicle's nearest single-line Komuter stop.
+            const [lng, lat] = f.geometry.coordinates;
+            const nearest = nearestStop(stops, lng, lat);
+            p.route_short_name = nearest ? nearest.line : 'KTM Komuter';
+          }
+        }
+      }
+
+      // Non-standard extra member; GeoJSON consumers ignore it, the UI reads it
+      // to surface empty/unavailable feeds.
+      fc.feeds = Object.values(feedStatus);
+      res.writeHead(200, { 'Content-Type': 'application/geo+json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(fc));
+    } catch (err) {
+      console.error('[GTFS-RT] /realtime.geojson failed:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end('{"type":"FeatureCollection","features":[]}');
+    }
+    return;
+  }
+  // Next scheduled departures for a stop. Only Rapid Rail uses this (it's
+  // frequency-based and has no realtime feed); other agencies broadcast live
+  // positions, so they return an empty list. Backed by public.get_rail_arrivals.
+  if (url === '/arrivals') {
+    const params = new URLSearchParams((req.url || '').split('?')[1] || '');
+    const stopId = params.get('stop_id');
+    const agency = params.get('agency');
+    const limit = Math.min(Math.max(Number(params.get('limit')) || 4, 1), 10);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    if (!stopId || agency !== 'rapid-rail') { res.end(JSON.stringify({ stop_id: stopId, arrivals: [] })); return; }
+    try {
+      const { rows } = await pool.query('SELECT * FROM public.get_rail_arrivals($1, $2)', [stopId, limit]);
+      const arrivals = rows.map((r) => ({
+        route: r.route_short_name,
+        headsign: r.trip_headsign,
+        // departure comes back as an interval object {hours,minutes,...}; format HH:MM.
+        time: `${String((r.departure?.hours ?? 0) % 24).padStart(2, '0')}:${String(r.departure?.minutes ?? 0).padStart(2, '0')}`,
+      }));
+      res.end(JSON.stringify({ stop_id: stopId, arrivals }));
+    } catch (err) {
+      console.error('[GTFS-RT] /arrivals failed:', err.message);
+      res.end(JSON.stringify({ stop_id: stopId, arrivals: [] }));
+    }
+    return;
+  }
+  // Full route geometry as GeoJSON, used by the frontend to animate live
+  // vehicles ALONG the route line (rather than straight-line between updates).
+  // Cached per agency+route (static geometry). KTMB has no geometry here.
+  if (url === '/route_geojson') {
+    const params = new URLSearchParams((req.url || '').split('?')[1] || '');
+    const agency = params.get('agency');
+    const route = params.get('route');
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' });
+    if (!agency || !route) { res.end('null'); return; }
+    const key = `${agency}::${route}`;
+    if (routeGeomCache.has(key)) { res.end(routeGeomCache.get(key)); return; }
+    try {
+      const { rows } = await pool.query(
+        `SELECT ST_AsGeoJSON(ST_Collect(geom)) AS g
+           FROM public.transit_routes WHERE agency = $1 AND route_short_name = $2`,
+        [agency, route]
+      );
+      const g = rows[0]?.g || 'null';
+      routeGeomCache.set(key, g);
+      res.end(g);
+    } catch (err) {
+      console.error('[GTFS-RT] /route_geojson failed:', err.message);
+      res.end('null');
+    }
+    return;
+  }
+  if (url === '/healthz') { res.writeHead(200); res.end('ok'); return; }
+  res.writeHead(404); res.end('Not found');
+});
+httpServer.listen(HTTP_PORT, () => console.log(`[GTFS-RT] HTTP endpoint on :${HTTP_PORT} (/realtime.geojson)`));
 
 console.log('[GTFS-RT] Connecting to database...');
 pool.query('SELECT 1').then(() => {

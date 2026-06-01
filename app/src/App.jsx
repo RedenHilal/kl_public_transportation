@@ -5,14 +5,71 @@ import Sidebar from './components/Sidebar';
 import Legend from './components/Legend';
 import { ServiceAlerts } from './components/ServiceAlerts';
 import { RealtimeLayers } from './components/Map/RealtimeLayers';
+import { Toast } from './components/Toast';
 import { useRouteMetadata } from './hooks/useRouteMetadata';
+import { useRouteGeometry } from './hooks/useRouteGeometry';
+import { useRealtime } from './hooks/useRealtime';
 import { LAYER_DEFS, INTERACTIVE_LAYERS, ASSET_MAP, AGENCY_LABELS } from './constants/transit';
+import { MARTIN_URL, ARRIVALS_URL } from './constants/config';
+import { AGENCY_COLORS, isLight, legendColor } from './constants/colors';
+import { autoScrollAll } from './utils/marquee';
+
+// Maps a realtime layer toggle id to its feed agency_name (for empty-feed toasts).
+const REALTIME_TOGGLE_AGENCY = {
+  'realtime-ktmb': 'ktmb',
+  'realtime-rapid-bus': 'rapid-bus',
+  'realtime-mrt-feeder': 'rapid-mrt',
+};
+
+// Draws an upward-pointing arrow on a canvas and returns ImageData for map.addImage.
+// Rendered at 2x (registered with pixelRatio: 2) for crisp edges.
+function makeArrowIcon(fill, outline) {
+  const size = 44;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const c = size / 2;
+  ctx.translate(c, c);
+  ctx.beginPath();
+  ctx.moveTo(0, -size * 0.40);          // tip (north)
+  ctx.lineTo(size * 0.30, size * 0.36); // bottom-right
+  ctx.lineTo(0, size * 0.12);           // tail notch
+  ctx.lineTo(-size * 0.30, size * 0.36);// bottom-left
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.lineWidth = size * 0.07;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = outline;
+  ctx.stroke();
+  return ctx.getImageData(0, 0, size, size);
+}
+
+// Draws a colored rounded square ("chip") — a non-directional live-vehicle marker
+// for feeds without a heading (KTMB), distinct from the round station dots.
+function makeChipIcon(fill, outline) {
+  const size = 44;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const m = size * 0.18;          // margin
+  const w = size - m * 2;         // square side
+  const r = size * 0.16;          // corner radius
+  ctx.beginPath();
+  ctx.roundRect(m, m, w, w, r);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.lineWidth = size * 0.09;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = outline;
+  ctx.stroke();
+  return ctx.getImageData(0, 0, size, size);
+}
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './App.css';
 
 function App() {
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem('transit-theme') === 'dark');
-  const [realtimeEnabled, setRealtimeEnabled] = useState(false);
   const [popupInfo, setPopupInfo] = useState(null);
   const [mobileExpanded, setMobileExpanded] = useState(false);
   const [nearbyStops, setNearbyStops] = useState(null);
@@ -30,19 +87,55 @@ function App() {
 
   const [mapLoaded, setMapLoaded] = useState(false);
   const mapInstanceRef = useRef(null);
+  const clickSeq = useRef(0); // guards async arrivals fetch against later clicks
+  const getParts = useRouteGeometry();
   const routeMetadata = useRouteMetadata(mapLoaded ? mapInstanceRef.current : null);
 
-  // Note: useRealtimeBuses might be legacy or used elsewhere, 
-  // but let's keep it if it was in the stashed version (it wasn't explicitly removed in the stash block I saw, but let's check)
-  // Actually, the stash block removed the call to useRealtimeBuses in the imports, but I should check if it's still used.
-  // In the "Stashed changes" block of imports, it was REMOVED.
-  // However, I see "const { data: busData, status, busCount, lastUpdate } = useRealtimeBuses(realtimeEnabled);" in the middle.
-  // I should probably remove it if I'm favoring the stash. 
-  // Wait, the "Stashed changes" block for imports didn't include useRealtimeBuses.
-  
+  // Live fleet GeoJSON + per-feed status (for empty/unavailable detection).
+  const { data: realtimeData, feeds: realtimeFeeds, status: realtimeStatus, lastUpdate: realtimeLastUpdate } = useRealtime(refreshKey);
+  const feedsRef = useRef([]);
+  useEffect(() => { feedsRef.current = realtimeFeeds; }, [realtimeFeeds]);
+  const [toast, setToast] = useState(null);
+
+  // route_short_name -> palette color, so live vehicles can follow their route's color.
+  const routeColorMap = useMemo(() => {
+    const m = {};
+    (routeMetadata?.routes || []).forEach((r) => {
+      if (r.agency && r.shortName) {
+        m[`${r.agency}:${r.shortName}`] = legendColor({ agency: r.agency, shortName: r.shortName, routeColor: r.color });
+      }
+    });
+    return m;
+  }, [routeMetadata]);
+
+  // Color each live vehicle by its route (falls back to agency color). Headings
+  // (dirBearing/hasHeading) are already set in useRealtime. arrowIcon names a
+  // per-color icon generated on demand in handleMapLoad.
+  const enrichedRealtime = useMemo(() => {
+    const features = (realtimeData?.features || []).map((f) => {
+      const p = f.properties || {};
+      const agency = p.agency_name;
+      const color = routeColorMap[`${agency}:${p.route_id}`] || AGENCY_COLORS[agency] || '#37474F';
+      const key = color.replace('#', '');
+      return { ...f, properties: { ...p, color, arrowIcon: `arrow_${key}`, chipIcon: `chip_${key}` } };
+    });
+    return { type: 'FeatureCollection', features };
+  }, [realtimeData, routeColorMap]);
+
   const toggleLayer = useCallback((layerId, isRealtime, checked) => {
-    if (isRealtime) setRealtimeEnabled(checked);
     setVisibility(prev => ({ ...prev, [layerId]: checked }));
+
+    // When a realtime layer is switched ON, warn if its upstream feed is empty/unavailable.
+    if (isRealtime && checked) {
+      const agency = REALTIME_TOGGLE_AGENCY[layerId];
+      const fs = feedsRef.current.find((f) => f.agency === agency);
+      const label = AGENCY_LABELS[agency] || 'This service';
+      if (fs && !fs.ok) {
+        setToast({ type: 'warn', message: `${label} live tracking is unavailable right now.` });
+      } else if (fs && fs.vehicles === 0) {
+        setToast({ type: 'info', message: `No live ${label} vehicles in the feed right now — the operator isn't broadcasting positions.` });
+      }
+    }
   }, []);
 
   const toggleDark = useCallback(() => {
@@ -101,28 +194,78 @@ function App() {
     const props = feature.properties;
     const layerId = feature.layer?.id;
 
+    // Colored pill matching the route's map color (text auto-contrasts).
+    const badge = (label, agency, shortName, routeColor) => {
+      const c = legendColor({ agency, shortName, routeColor });
+      return `<span class="popup-badge" style="background:${c};color:${isLight(c) ? '#222' : '#fff'}">${label}</span>`;
+    };
+
     let html = '';
     if (layerId === 'realtime-bus' || layerId?.includes('realtime')) {
       const speed = props.speed != null ? (props.speed * 3.6).toFixed(1) + ' km/h' : 'N/A';
       const updated = props.timestamp ? new Date(props.timestamp * 1000).toLocaleTimeString() : '';
       const agencyLabel = AGENCY_LABELS[props.agency_name] || 'Live Vehicle';
-      const nextStop = props.next_stop_name ? `<br/><span>Approaching: <strong>${props.next_stop_name}</strong></span>` : '';
-      
-      html = `<strong>${props.vehicle_id || 'Vehicle'} #${props.vehicle_label || ''}</strong>
+      // KTMB has no route_id, but the fetcher resolves its line from trip_id —
+      // so KTM shows a "Line" badge + destination, others show their "Route".
+      const isKtm = props.agency_name === 'ktmb';
+      const routeLabel = props.route_short_name || props.route_id || '—';
+      const title = props.vehicle_label || props.vehicle_id || 'Vehicle';
+      const destRow = props.route_long_name
+        ? `<div class="popup-row"><span class="popup-key">Toward</span><span class="popup-val">${props.route_long_name}</span></div>`
+        : '';
+      const nextStop = props.next_stop_name
+        ? `<div class="popup-row"><span class="popup-key">Approaching</span><span class="popup-val">${props.next_stop_name}</span></div>`
+        : '';
+
+      html = `<strong>${title}</strong>
         <span class="popup-agency">${agencyLabel}</span>
-        <span>Route: ${props.route_id || 'N/A'} &#8226; ${speed}</span>
+        <div class="popup-row"><span class="popup-key">${isKtm ? 'Line' : 'Route'}</span>${badge(routeLabel, props.agency_name, props.route_short_name || props.route_id)}</div>
+        ${destRow}
+        <div class="popup-row"><span class="popup-key">Speed</span><span>${speed}</span></div>
         ${nextStop}
-        ${updated ? `<br/><span style="font-size:10px;color:var(--text-muted);">Updated: ${updated}</span>` : ''}`;
+        ${updated ? `<span style="font-size:10px;color:var(--text-muted);margin-top:4px;display:block;">Updated: ${updated}</span>` : ''}`;
     } else if (layerId?.includes('stops')) {
-      const agency = AGENCY_LABELS[props.agency] || '';
-      html = `<strong>${props.stop_name || 'Unnamed'}</strong><span class="popup-agency">${agency}</span>`;
-      if (props.agency === 'rapid-rail') {
-        html += `<div class="arrivals-box"><div class="arrivals-title">Live Arrivals</div><div class="arrival-row"><span>Fetching live times...</span></div></div>`;
+      const agencyLabel = AGENCY_LABELS[props.agency] || '';
+      let base = `<strong>${props.stop_name || 'Unnamed'}</strong><span class="popup-agency">${agencyLabel}</span>`;
+      if (props.stop_code) base += `<span>Code: ${props.stop_code}</span>`;
+      const routeList = (props.routes || '').split(', ').filter(Boolean);
+      if (routeList.length) {
+        const badges = routeList.map((n) => badge(n, props.agency, n)).join(' ');
+        base += `<div class="popup-detail badge-row">${badges}</div>`;
       }
-      if (props.stop_code) html += `<span>Code: ${props.stop_code}</span>`;
-      if (props.routes) html += `<div class="popup-detail"><span class="popup-badge">${props.routes}</span></div>`;
+
+      // Rapid Rail has no live feed (frequency-based) — fetch next scheduled
+      // departures and fill the box in once they arrive. Other agencies show live
+      // vehicles instead, so no schedule box for them.
+      if (props.agency === 'rapid-rail') {
+        const stopId = props.stop_id ?? feature.id;
+        const seq = ++clickSeq.current;
+        const box = (inner) => `<div class="arrivals-box"><div class="arrivals-title">Next Trains</div>${inner}</div>`;
+        const loading = box(`<div class="arrival-row"><span>Loading schedule…</span></div>`);
+        setPopupInfo({ lngLat: e.lngLat, html: base + loading });
+        fetch(`${ARRIVALS_URL}?stop_id=${encodeURIComponent(stopId)}&agency=rapid-rail`)
+          .then((r) => r.json())
+          .then(({ arrivals }) => {
+            if (seq !== clickSeq.current) return;
+            let inner;
+            if (!arrivals || arrivals.length === 0) {
+              inner = `<div class="arrival-row"><span>No more trains today</span></div>`;
+            } else {
+              inner = arrivals.map((a) =>
+                `<div class="arrival-row">${badge(a.route, 'rapid-rail', a.route)}<span class="arr-time">${a.time}</span><span class="arr-head"><span class="marquee"><span class="marquee-inner">${a.headsign || ''}</span></span></span></div>`
+              ).join('');
+            }
+            setPopupInfo({ lngLat: e.lngLat, html: base + box(inner) });
+          })
+          .catch(() => {
+            if (seq !== clickSeq.current) return;
+            setPopupInfo({ lngLat: e.lngLat, html: base + box(`<div class="arrival-row"><span>Schedule unavailable</span></div>`) });
+          });
+        return;
+      }
+      html = base;
     } else if (layerId?.includes('routes') || layerId === 'rail-lines') {
-      html = `<strong>${props.route_short_name || '?'}</strong>
+      html = `<strong>${badge(props.route_short_name || '?', props.agency, props.route_short_name, props.route_color)}</strong>
         <span class="popup-agency">${AGENCY_LABELS[props.agency] || ''} Route</span>
         <span>${props.route_long_name || ''}</span>`;
     }
@@ -133,6 +276,19 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
   }, [darkMode]);
+
+  // Auto-scroll any truncated text in the popup (e.g. long train headsigns).
+  // The popup content arrives in two stages (loading -> async arrivals) and
+  // MapLibre re-sizes the popup after we inject content, so a single rAF can
+  // measure too early. Re-run across a couple of frames + a short delay.
+  useEffect(() => {
+    if (!popupInfo) return;
+    const run = () => autoScrollAll(document.querySelector('.maplibregl-popup-content'));
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(run); });
+    const t = setTimeout(run, 350);
+    return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); clearTimeout(t); };
+  }, [popupInfo]);
 
   // Automated Refresh for Realtime Data
   useEffect(() => {
@@ -146,7 +302,7 @@ function App() {
     // 2. Fetch Service Alerts (every 60s)
     const fetchAlerts = async () => {
       try {
-        const res = await fetch(`https://yuellen.my.id/martin/service_alerts/0/0/0?t=${Date.now()}`);
+        const res = await fetch(`${MARTIN_URL}/service_alerts/0/0/0?t=${Date.now()}`);
         if (!res.ok) return;
         const data = await res.json();
         if (data.features) setAlerts(data.features.map(f => f.properties));
@@ -167,7 +323,7 @@ function App() {
     const map = e.target;
     mapInstanceRef.current = map;
     setMapLoaded(true);
-    
+
     ASSET_MAP.forEach(async (asset) => {
       try {
         const image = await map.loadImage(asset.path);
@@ -176,6 +332,23 @@ function App() {
         }
       } catch (err) {
         console.warn(`Failed to load asset: ${asset.id}`, err);
+      }
+    });
+
+    // Directional arrow icons are generated on demand, one per route color, so
+    // each live vehicle's arrow matches its route. Features request `arrow_<hex>`;
+    // we draw it the first time it's missing (drawn pointing up so icon-rotate
+    // aligns with north). Robust across HMR — no pre-registration needed.
+    map.on('styleimagemissing', (e) => {
+      const id = e.id;
+      if (!id || map.hasImage(id)) return;
+      const make = id.startsWith('arrow_') ? makeArrowIcon : id.startsWith('chip_') ? makeChipIcon : null;
+      if (!make) return;
+      const hex = `#${id.slice(id.indexOf('_') + 1)}`;
+      try {
+        map.addImage(id, make(hex, isLight(hex) ? '#333333' : '#ffffff'), { pixelRatio: 2 });
+      } catch (err) {
+        console.warn(`Failed to generate icon: ${id}`, err);
       }
     });
   }, []);
@@ -224,9 +397,9 @@ function App() {
         onToggle={toggleLayer}
         onSearch={handleSearch}
         onLocate={handleLocate}
-        status={realtimeEnabled ? 'live' : 'idle'}
-        busCount={0} // This was from useRealtimeBuses, setting to 0 or removing if not used
-        lastUpdate={new Date().toLocaleTimeString()}
+        feeds={realtimeFeeds}
+        realtimeStatus={realtimeStatus}
+        lastUpdate={realtimeLastUpdate}
         nearbyStops={nearbyStops}
         onNearbyStopClick={(stop) => mapInstanceRef.current?.flyTo({ center: [stop.lon, stop.lat], zoom: 17 })}
         darkMode={darkMode}
@@ -246,19 +419,19 @@ function App() {
           mapStyle={mapStyle}
           transformRequest={transformRequest}
           maxBounds={[[98.5, 0.5], [120, 7.5]]}
+          onMouseEnter={() => { const c = mapInstanceRef.current?.getCanvas(); if (c) c.style.cursor = 'pointer'; }}
+          onMouseLeave={() => { const c = mapInstanceRef.current?.getCanvas(); if (c) c.style.cursor = ''; }}
           interactiveLayerIds={[
             ...INTERACTIVE_LAYERS,
-            'realtime-ktmb-A', 'realtime-ktmb-B',
-            'realtime-rapid-bus-A', 'realtime-rapid-bus-B',
-            'realtime-mrt-feeder-A', 'realtime-mrt-feeder-B'
+            'realtime-ktmb', 'realtime-rapid-bus', 'realtime-mrt-feeder'
           ]}
           onClick={handleMapClick}
         >
-          <Source id="routes" type="vector" tiles={['https://yuellen.my.id/martin/transit_routes/{z}/{x}/{y}']} minzoom={6} maxzoom={20} />
-          <Source id="stops" type="vector" tiles={['https://yuellen.my.id/martin/transit_stops/{z}/{x}/{y}']} minzoom={8} maxzoom={20} />
+          <Source id="routes" type="vector" tiles={[`${MARTIN_URL}/transit_routes/{z}/{x}/{y}`]} minzoom={6} maxzoom={20} />
+          <Source id="stops" type="vector" tiles={[`${MARTIN_URL}/transit_stops/{z}/{x}/{y}`]} minzoom={8} maxzoom={20} />
           
           {layerComponents}
-          <RealtimeLayers visibility={visibility} refreshKey={refreshKey} />
+          <RealtimeLayers visibility={visibility} data={enrichedRealtime} getParts={getParts} />
 
           {popupInfo && (
             <Popup longitude={popupInfo.lngLat.lng} latitude={popupInfo.lngLat.lat} onClose={() => setPopupInfo(null)} anchor="top">
@@ -269,6 +442,7 @@ function App() {
       </div>
 
       <Legend routeMetadata={routeMetadata} visibility={visibility} />
+      <Toast toast={toast} onClose={() => setToast(null)} />
     </>
   );
 }

@@ -1,4 +1,30 @@
 services:
+  # Local PostGIS for development. Pinned to PG14 + PostGIS 3.2 to match
+  # production. Published on host port 5433 so it does not clash with a
+  # native Postgres already on 5432. The postgis image auto-enables the
+  # PostGIS extension in POSTGRES_DB on first init.
+  # NOTE: dev-only. In production the DB is remote and this service is unused.
+  db:
+    image: postgis/postgis:14-3.2
+    container_name: transit-db
+    restart: unless-stopped
+    # dev profile: only starts with `--profile dev` (or COMPOSE_PROFILES=dev).
+    # A plain `docker compose up` (production) skips this service entirely.
+    profiles: ["dev"]
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_DB=gis_malay
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - transit_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gis_malay"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   martin:
     image: ghcr.io/maplibre/martin:1.8.2
     pull_policy: always
@@ -10,11 +36,22 @@ services:
       - ./martin/martin.yaml:/etc/martin/config.yaml:ro
     environment:
       - DATABASE_URL=${DATABASE_URL}
+      # Optional. When set (dev uses 0), Martin's in-memory tile cache is sized
+      # accordingly; 0 disables it. Martin caches table-source tiles by z/x/y and
+      # ignores query params, which freezes the realtime layer. Unset (prod) =>
+      # no flag passed => Martin's default behavior is untouched.
+      - MARTIN_CACHE_SIZE=${MARTIN_CACHE_SIZE:-}
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         envsubst '$$DATABASE_URL' < /etc/martin/config.yaml > /tmp/martin.yaml
-        exec /usr/local/bin/martin --config /tmp/martin.yaml --webui enable-for-all
+        CACHE_FLAG=""
+        [ -n "$$MARTIN_CACHE_SIZE" ] && CACHE_FLAG="--cache-size $$MARTIN_CACHE_SIZE"
+        exec /usr/local/bin/martin --config /tmp/martin.yaml $$CACHE_FLAG --webui enable-for-all
     stop_grace_period: 10s
 
   web:
@@ -26,3 +63,7 @@ services:
     restart: unless-stopped
     ports:
       - "${WEB_PORT:-8000}:80"
+
+volumes:
+  # dev-only PostGIS data volume (used by the `db` service under the dev profile)
+  transit_pgdata:

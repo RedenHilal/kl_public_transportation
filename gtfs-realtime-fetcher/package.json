@@ -1,0 +1,15 @@
+{
+  "name": "gtfs-realtime-fetcher",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Polls data.gov.my GTFS-Realtime feeds and writes vehicle positions + service alerts into PostGIS.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "pg": "^8.21.0",
+    "protobufjs": "^8.5.0"
+  }
+}
