@@ -3,9 +3,12 @@ import { REALTIME_URL } from '../constants/config';
 
 const EMPTY = { type: 'FeatureCollection', features: [] };
 
-// Adds a persistent heading to each vehicle: a stopped vehicle (bearing 0) keeps
-// pointing in its last-known direction instead of losing its arrow. Runs in the
-// fetch callback (not during render), so the ref access is safe.
+// Adds a heading to each vehicle. Every live vehicle is rendered as a directional
+// arrow (never a plain dot — that's indistinguishable from a station marker), so
+// `hasHeading` is always true. dirBearing prefers the current bearing, falls back
+// to the vehicle's last-known non-zero heading, and finally to 0 (points up) when
+// no heading was ever reported — e.g. KTMB, which broadcasts bearing 0 for every
+// train. Runs in the fetch callback (not during render), so the ref access is safe.
 function withHeadings(json, lastBearing) {
   if (!json || !json.features) return EMPTY;
   const features = json.features.map((f) => {
@@ -13,7 +16,7 @@ function withHeadings(json, lastBearing) {
     const b = Number(p.bearing) || 0;
     if (b !== 0 && p.vehicle_id) lastBearing[p.vehicle_id] = b;
     const dirBearing = b !== 0 ? b : (lastBearing[p.vehicle_id] || 0);
-    return { ...f, properties: { ...p, dirBearing, hasHeading: dirBearing !== 0 } };
+    return { ...f, properties: { ...p, dirBearing, hasHeading: true } };
   });
   return { type: 'FeatureCollection', features };
 }

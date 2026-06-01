@@ -9,8 +9,9 @@ import { Toast } from './components/Toast';
 import { useRouteMetadata } from './hooks/useRouteMetadata';
 import { useRealtime } from './hooks/useRealtime';
 import { LAYER_DEFS, INTERACTIVE_LAYERS, ASSET_MAP, AGENCY_LABELS } from './constants/transit';
-import { MARTIN_URL } from './constants/config';
+import { MARTIN_URL, ARRIVALS_URL } from './constants/config';
 import { AGENCY_COLORS, isLight, legendColor } from './constants/colors';
+import { autoScrollAll } from './utils/marquee';
 
 // Maps a realtime layer toggle id to its feed agency_name (for empty-feed toasts).
 const REALTIME_TOGGLE_AGENCY = {
@@ -42,6 +43,27 @@ function makeArrowIcon(fill, outline) {
   ctx.stroke();
   return ctx.getImageData(0, 0, size, size);
 }
+
+// Draws a colored rounded square ("chip") — a non-directional live-vehicle marker
+// for feeds without a heading (KTMB), distinct from the round station dots.
+function makeChipIcon(fill, outline) {
+  const size = 44;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const m = size * 0.18;          // margin
+  const w = size - m * 2;         // square side
+  const r = size * 0.16;          // corner radius
+  ctx.beginPath();
+  ctx.roundRect(m, m, w, w, r);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.lineWidth = size * 0.09;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = outline;
+  ctx.stroke();
+  return ctx.getImageData(0, 0, size, size);
+}
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './App.css';
 
@@ -64,6 +86,7 @@ function App() {
 
   const [mapLoaded, setMapLoaded] = useState(false);
   const mapInstanceRef = useRef(null);
+  const clickSeq = useRef(0); // guards async arrivals fetch against later clicks
   const routeMetadata = useRouteMetadata(mapLoaded ? mapInstanceRef.current : null);
 
   // Live fleet GeoJSON + per-feed status (for empty/unavailable detection).
@@ -91,7 +114,8 @@ function App() {
       const p = f.properties || {};
       const agency = p.agency_name;
       const color = routeColorMap[`${agency}:${p.route_id}`] || AGENCY_COLORS[agency] || '#37474F';
-      return { ...f, properties: { ...p, color, arrowIcon: `arrow_${color.replace('#', '')}` } };
+      const key = color.replace('#', '');
+      return { ...f, properties: { ...p, color, arrowIcon: `arrow_${key}`, chipIcon: `chip_${key}` } };
     });
     return { type: 'FeatureCollection', features };
   }, [realtimeData, routeColorMap]);
@@ -168,28 +192,78 @@ function App() {
     const props = feature.properties;
     const layerId = feature.layer?.id;
 
+    // Colored pill matching the route's map color (text auto-contrasts).
+    const badge = (label, agency, shortName, routeColor) => {
+      const c = legendColor({ agency, shortName, routeColor });
+      return `<span class="popup-badge" style="background:${c};color:${isLight(c) ? '#222' : '#fff'}">${label}</span>`;
+    };
+
     let html = '';
     if (layerId === 'realtime-bus' || layerId?.includes('realtime')) {
       const speed = props.speed != null ? (props.speed * 3.6).toFixed(1) + ' km/h' : 'N/A';
       const updated = props.timestamp ? new Date(props.timestamp * 1000).toLocaleTimeString() : '';
       const agencyLabel = AGENCY_LABELS[props.agency_name] || 'Live Vehicle';
-      const nextStop = props.next_stop_name ? `<br/><span>Approaching: <strong>${props.next_stop_name}</strong></span>` : '';
-      
-      html = `<strong>${props.vehicle_id || 'Vehicle'} #${props.vehicle_label || ''}</strong>
+      // KTMB has no route_id, but the fetcher resolves its line from trip_id —
+      // so KTM shows a "Line" badge + destination, others show their "Route".
+      const isKtm = props.agency_name === 'ktmb';
+      const routeLabel = props.route_short_name || props.route_id || '—';
+      const title = props.vehicle_label || props.vehicle_id || 'Vehicle';
+      const destRow = props.route_long_name
+        ? `<div class="popup-row"><span class="popup-key">Toward</span><span class="popup-val">${props.route_long_name}</span></div>`
+        : '';
+      const nextStop = props.next_stop_name
+        ? `<div class="popup-row"><span class="popup-key">Approaching</span><span class="popup-val">${props.next_stop_name}</span></div>`
+        : '';
+
+      html = `<strong>${title}</strong>
         <span class="popup-agency">${agencyLabel}</span>
-        <span>Route: ${props.route_id || 'N/A'} &#8226; ${speed}</span>
+        <div class="popup-row"><span class="popup-key">${isKtm ? 'Line' : 'Route'}</span>${badge(routeLabel, props.agency_name, props.route_short_name || props.route_id)}</div>
+        ${destRow}
+        <div class="popup-row"><span class="popup-key">Speed</span><span>${speed}</span></div>
         ${nextStop}
-        ${updated ? `<br/><span style="font-size:10px;color:var(--text-muted);">Updated: ${updated}</span>` : ''}`;
+        ${updated ? `<span style="font-size:10px;color:var(--text-muted);margin-top:4px;display:block;">Updated: ${updated}</span>` : ''}`;
     } else if (layerId?.includes('stops')) {
-      const agency = AGENCY_LABELS[props.agency] || '';
-      html = `<strong>${props.stop_name || 'Unnamed'}</strong><span class="popup-agency">${agency}</span>`;
-      if (props.agency === 'rapid-rail') {
-        html += `<div class="arrivals-box"><div class="arrivals-title">Live Arrivals</div><div class="arrival-row"><span>Fetching live times...</span></div></div>`;
+      const agencyLabel = AGENCY_LABELS[props.agency] || '';
+      let base = `<strong>${props.stop_name || 'Unnamed'}</strong><span class="popup-agency">${agencyLabel}</span>`;
+      if (props.stop_code) base += `<span>Code: ${props.stop_code}</span>`;
+      const routeList = (props.routes || '').split(', ').filter(Boolean);
+      if (routeList.length) {
+        const badges = routeList.map((n) => badge(n, props.agency, n)).join(' ');
+        base += `<div class="popup-detail badge-row">${badges}</div>`;
       }
-      if (props.stop_code) html += `<span>Code: ${props.stop_code}</span>`;
-      if (props.routes) html += `<div class="popup-detail"><span class="popup-badge">${props.routes}</span></div>`;
+
+      // Rapid Rail has no live feed (frequency-based) — fetch next scheduled
+      // departures and fill the box in once they arrive. Other agencies show live
+      // vehicles instead, so no schedule box for them.
+      if (props.agency === 'rapid-rail') {
+        const stopId = props.stop_id ?? feature.id;
+        const seq = ++clickSeq.current;
+        const box = (inner) => `<div class="arrivals-box"><div class="arrivals-title">Next Trains</div>${inner}</div>`;
+        const loading = box(`<div class="arrival-row"><span>Loading schedule…</span></div>`);
+        setPopupInfo({ lngLat: e.lngLat, html: base + loading });
+        fetch(`${ARRIVALS_URL}?stop_id=${encodeURIComponent(stopId)}&agency=rapid-rail`)
+          .then((r) => r.json())
+          .then(({ arrivals }) => {
+            if (seq !== clickSeq.current) return;
+            let inner;
+            if (!arrivals || arrivals.length === 0) {
+              inner = `<div class="arrival-row"><span>No more trains today</span></div>`;
+            } else {
+              inner = arrivals.map((a) =>
+                `<div class="arrival-row">${badge(a.route, 'rapid-rail', a.route)}<span class="arr-time">${a.time}</span><span class="arr-head"><span class="marquee"><span class="marquee-inner">${a.headsign || ''}</span></span></span></div>`
+              ).join('');
+            }
+            setPopupInfo({ lngLat: e.lngLat, html: base + box(inner) });
+          })
+          .catch(() => {
+            if (seq !== clickSeq.current) return;
+            setPopupInfo({ lngLat: e.lngLat, html: base + box(`<div class="arrival-row"><span>Schedule unavailable</span></div>`) });
+          });
+        return;
+      }
+      html = base;
     } else if (layerId?.includes('routes') || layerId === 'rail-lines') {
-      html = `<strong>${props.route_short_name || '?'}</strong>
+      html = `<strong>${badge(props.route_short_name || '?', props.agency, props.route_short_name, props.route_color)}</strong>
         <span class="popup-agency">${AGENCY_LABELS[props.agency] || ''} Route</span>
         <span>${props.route_long_name || ''}</span>`;
     }
@@ -200,6 +274,19 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
   }, [darkMode]);
+
+  // Auto-scroll any truncated text in the popup (e.g. long train headsigns).
+  // The popup content arrives in two stages (loading -> async arrivals) and
+  // MapLibre re-sizes the popup after we inject content, so a single rAF can
+  // measure too early. Re-run across a couple of frames + a short delay.
+  useEffect(() => {
+    if (!popupInfo) return;
+    const run = () => autoScrollAll(document.querySelector('.maplibregl-popup-content'));
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(run); });
+    const t = setTimeout(run, 350);
+    return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); clearTimeout(t); };
+  }, [popupInfo]);
 
   // Automated Refresh for Realtime Data
   useEffect(() => {
@@ -252,12 +339,14 @@ function App() {
     // aligns with north). Robust across HMR — no pre-registration needed.
     map.on('styleimagemissing', (e) => {
       const id = e.id;
-      if (!id || !id.startsWith('arrow_') || map.hasImage(id)) return;
-      const hex = `#${id.slice('arrow_'.length)}`;
+      if (!id || map.hasImage(id)) return;
+      const make = id.startsWith('arrow_') ? makeArrowIcon : id.startsWith('chip_') ? makeChipIcon : null;
+      if (!make) return;
+      const hex = `#${id.slice(id.indexOf('_') + 1)}`;
       try {
-        map.addImage(id, makeArrowIcon(hex, isLight(hex) ? '#333333' : '#ffffff'), { pixelRatio: 2 });
+        map.addImage(id, make(hex, isLight(hex) ? '#333333' : '#ffffff'), { pixelRatio: 2 });
       } catch (err) {
-        console.warn(`Failed to generate arrow icon: ${id}`, err);
+        console.warn(`Failed to generate icon: ${id}`, err);
       }
     });
   }, []);
@@ -328,11 +417,11 @@ function App() {
           mapStyle={mapStyle}
           transformRequest={transformRequest}
           maxBounds={[[98.5, 0.5], [120, 7.5]]}
+          onMouseEnter={() => { const c = mapInstanceRef.current?.getCanvas(); if (c) c.style.cursor = 'pointer'; }}
+          onMouseLeave={() => { const c = mapInstanceRef.current?.getCanvas(); if (c) c.style.cursor = ''; }}
           interactiveLayerIds={[
             ...INTERACTIVE_LAYERS,
-            'realtime-ktmb', 'realtime-ktmb-arrow',
-            'realtime-rapid-bus', 'realtime-rapid-bus-arrow',
-            'realtime-mrt-feeder', 'realtime-mrt-feeder-arrow'
+            'realtime-ktmb', 'realtime-rapid-bus', 'realtime-mrt-feeder'
           ]}
           onClick={handleMapClick}
         >

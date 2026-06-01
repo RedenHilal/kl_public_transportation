@@ -1,9 +1,21 @@
-import { memo } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import { AGENCY_LABELS } from '../constants/transit';
 import { legendColor, AGENCY_COLORS, STATION_COLOR } from '../constants/colors';
+import { autoScrollAll } from '../utils/marquee';
 
 function Legend({ routeMetadata, visibility }) {
   const { routes } = routeMetadata || { routes: [] };
+  const rootRef = useRef(null);
+
+  // Marquee any route names that overflow their row; re-measure on content/size change.
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    autoScrollAll(el);
+    const ro = new ResizeObserver(() => autoScrollAll(el));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [routes, visibility]);
 
   // Mapping of agency to its primary route/line visibility toggle
   const AGENCY_TO_LAYER = {
@@ -72,7 +84,7 @@ function Legend({ routeMetadata, visibility }) {
   if (Object.keys(grouped).length === 0 && !showStations) return null;
 
   return (
-    <div id="legend">
+    <div id="legend" ref={rootRef}>
       <div className="legend-scroll-area">
         {Object.entries(grouped).map(([agency, agencyItems]) => (
           <div key={agency} className="legend-group">
@@ -82,9 +94,7 @@ function Legend({ routeMetadata, visibility }) {
                 <div className="legend-row small" key={i} title={item.names.join(', ')}>
                   <span className="legend-line" style={{ background: item.color }} />
                   <span className="route-name">
-                    {item.names.length > 2 
-                      ? `${item.names.slice(0, 2).join(', ')}...` 
-                      : item.names.join(', ')}
+                    <span className="marquee"><span className="marquee-inner">{item.names.join(', ')}</span></span>
                   </span>
                 </div>
               ))}

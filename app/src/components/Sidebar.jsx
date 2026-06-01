@@ -22,9 +22,9 @@ const SECTIONS = [
   {
     title: 'Realtime',
     items: [
-      { id: 'realtime-ktmb', agency: 'ktmb', toggleId: 'toggle-realtime-ktmb', label: 'KTMB Trains', swatch: '#1964B7', type: 'dot', checked: false },
-      { id: 'realtime-rapid-bus', agency: 'rapid-bus', toggleId: 'toggle-realtime-rapid-bus', label: 'Rapid Bus', swatch: '#0078D4', type: 'dot', checked: false },
-      { id: 'realtime-mrt-feeder', agency: 'rapid-mrt', toggleId: 'toggle-realtime-mrt-feeder', label: 'MRT Feeder', swatch: '#FFCD00', type: 'dot', checked: false },
+      { id: 'realtime-ktmb', agency: 'ktmb', toggleId: 'toggle-realtime-ktmb', label: 'KTMB Trains', type: 'marker', marker: 'chip', checked: false },
+      { id: 'realtime-rapid-bus', agency: 'rapid-bus', toggleId: 'toggle-realtime-rapid-bus', label: 'Rapid Bus', type: 'marker', marker: 'arrow', checked: false },
+      { id: 'realtime-mrt-feeder', agency: 'rapid-mrt', toggleId: 'toggle-realtime-mrt-feeder', label: 'MRT Feeder', type: 'marker', marker: 'arrow', checked: false },
     ],
   },
 ];
@@ -154,7 +154,9 @@ function Sidebar({
                           onRouteClick(item.id);
                        }
                     }}>
-                      <span className={`swatch${item.type === 'dot' ? ' dot' : ''}`} style={swatchStyle} />
+                      {item.type === 'marker'
+                        ? <MarkerSwatch shape={item.marker} color={AGENCY_COLORS[item.agency] || STATION_COLOR} />
+                        : <span className={`swatch${item.type === 'dot' ? ' dot' : ''}`} style={swatchStyle} />}
                       {item.label}
                     </span>
                     {isRealtime && <LiveCount feed={(feeds || []).find(f => f.agency === item.agency)} />}
@@ -168,6 +170,21 @@ function Sidebar({
         <NearbyStops stops={nearbyStops} onStopClick={onNearbyStopClick} />
       </div>
     </div>
+  );
+}
+
+// Swatch for realtime rows: mirrors the live marker drawn on the map — a colored
+// rounded chip (KTMB, no heading data) or an up-pointing arrow (bus / feeder).
+function MarkerSwatch({ shape, color }) {
+  if (shape === 'chip') {
+    return <span className="swatch chip" style={{ background: color }} />;
+  }
+  return (
+    <span className="swatch arrow" aria-hidden="true">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill={color} stroke="#fff" strokeWidth="1.5" strokeLinejoin="round">
+        <path d="M12 3 L19 21 L12 16 L5 21 Z" />
+      </svg>
+    </span>
   );
 }
 

@@ -14,3 +14,9 @@ export const MARTIN_URL =
 // via VITE_REALTIME_URL in app/.env.development.
 export const REALTIME_URL =
   import.meta.env.VITE_REALTIME_URL ?? 'https://yuellen.my.id/realtime.geojson';
+
+// Next-departures lookup for Rapid Rail stops (the fetcher's /arrivals endpoint;
+// rail is frequency-based and has no live feed). Prod: nginx proxies this path to
+// the fetcher; dev points at it directly via VITE_ARRIVALS_URL in .env.development.
+export const ARRIVALS_URL =
+  import.meta.env.VITE_ARRIVALS_URL ?? 'https://yuellen.my.id/arrivals';

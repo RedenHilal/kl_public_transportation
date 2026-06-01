@@ -186,6 +186,30 @@ function setFeedStatus(agency, fields) {
   feedStatus[agency] = { agency, fetched_at: new Date().toISOString(), ...fields };
 }
 
+// KTMB live vehicles carry no route_id, but their trip_id maps to a line via
+// ktmb.trips -> ktmb.routes. That data is static GTFS (tiny: ~300 trips, 9
+// routes), so cache the lookup and refresh occasionally to pick up a feed reload.
+const KTMB_ROUTES_TTL_MS = 30 * 60 * 1000;
+let ktmbTripRoutes = null;        // Map(trip_id -> { short, long })
+let ktmbTripRoutesAt = 0;
+async function getKtmbTripRoutes() {
+  if (ktmbTripRoutes && Date.now() - ktmbTripRoutesAt < KTMB_ROUTES_TTL_MS) return ktmbTripRoutes;
+  try {
+    const { rows } = await pool.query(
+      `SELECT t.trip_id, r.route_short_name, r.route_long_name
+         FROM ktmb.trips t JOIN ktmb.routes r ON r.route_id = t.route_id`
+    );
+    const map = new Map();
+    for (const row of rows) map.set(row.trip_id, { short: row.route_short_name, long: row.route_long_name });
+    ktmbTripRoutes = map;
+    ktmbTripRoutesAt = Date.now();
+  } catch (err) {
+    console.error('[GTFS-RT] ktmb trip->route lookup failed:', err.message);
+    if (!ktmbTripRoutes) ktmbTripRoutes = new Map(); // avoid retry storm; reuse last good otherwise
+  }
+  return ktmbTripRoutes;
+}
+
 async function fetchEndpoint(endpoint) {
   try {
     const resp = await fetch(endpoint.url, {
@@ -333,6 +357,26 @@ const httpServer = http.createServer(async (req, res) => {
     try {
       const { rows } = await pool.query('SELECT public.get_realtime_geojson() AS fc');
       const fc = rows[0].fc || { type: 'FeatureCollection', features: [] };
+
+      // KTMB trains have no route_id; resolve their line from trip_id so the UI
+      // can show "Ipoh Line", the destination, etc. (partial — GTFS-RT includes
+      // trips the static feed doesn't, which simply stay unresolved).
+      const ktmbRoutes = await getKtmbTripRoutes();
+      for (const f of fc.features || []) {
+        const p = f.properties;
+        if (p && p.agency_name === 'ktmb') {
+          const line = ktmbRoutes.get(p.trip_id);
+          if (line) {
+            p.route_short_name = line.short;
+            p.route_long_name = line.long;
+          } else if (/^(weekday|weekend|saturday|sunday)_/i.test(p.trip_id || '')) {
+            // Komuter trip missing from the static feed (live numbers outrun it).
+            // The service-day prefix still reliably marks it as KTM Komuter.
+            p.route_short_name = 'KTM Komuter';
+          }
+        }
+      }
+
       // Non-standard extra member; GeoJSON consumers ignore it, the UI reads it
       // to surface empty/unavailable feeds.
       fc.feeds = Object.values(feedStatus);
@@ -342,6 +386,31 @@ const httpServer = http.createServer(async (req, res) => {
       console.error('[GTFS-RT] /realtime.geojson failed:', err.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end('{"type":"FeatureCollection","features":[]}');
+    }
+    return;
+  }
+  // Next scheduled departures for a stop. Only Rapid Rail uses this (it's
+  // frequency-based and has no realtime feed); other agencies broadcast live
+  // positions, so they return an empty list. Backed by public.get_rail_arrivals.
+  if (url === '/arrivals') {
+    const params = new URLSearchParams((req.url || '').split('?')[1] || '');
+    const stopId = params.get('stop_id');
+    const agency = params.get('agency');
+    const limit = Math.min(Math.max(Number(params.get('limit')) || 4, 1), 10);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    if (!stopId || agency !== 'rapid-rail') { res.end(JSON.stringify({ stop_id: stopId, arrivals: [] })); return; }
+    try {
+      const { rows } = await pool.query('SELECT * FROM public.get_rail_arrivals($1, $2)', [stopId, limit]);
+      const arrivals = rows.map((r) => ({
+        route: r.route_short_name,
+        headsign: r.trip_headsign,
+        // departure comes back as an interval object {hours,minutes,...}; format HH:MM.
+        time: `${String((r.departure?.hours ?? 0) % 24).padStart(2, '0')}:${String(r.departure?.minutes ?? 0).padStart(2, '0')}`,
+      }));
+      res.end(JSON.stringify({ stop_id: stopId, arrivals }));
+    } catch (err) {
+      console.error('[GTFS-RT] /arrivals failed:', err.message);
+      res.end(JSON.stringify({ stop_id: stopId, arrivals: [] }));
     }
     return;
   }

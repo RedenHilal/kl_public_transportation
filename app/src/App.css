@@ -120,6 +120,8 @@
 .toggle-label { flex: 1; display: flex; align-items: center; gap: 8px; }
 .swatch { display: inline-block; width: 20px; height: 3px; border-radius: 2px; flex-shrink: 0; }
 .swatch.dot { width: 10px; height: 10px; border-radius: 50%; }
+.swatch.chip { width: 12px; height: 12px; border-radius: 3px; border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.15); }
+.swatch.arrow { width: 14px; height: 14px; background: none; display: inline-flex; align-items: center; justify-content: center; }
 
 /* ── Nearby Stops ───────────────────────────────── */
 #nearby-stops { flex-shrink: 0; border-top: 1px solid var(--border); padding-top: 8px; }
@@ -163,7 +165,11 @@
 .legend-routes-grid { display: flex; flex-direction: column; gap: 2px; }
 .legend-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
 .legend-row.small { font-size: 10px; }
-.legend-row .route-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.legend-row .route-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+
+/* Auto-scrolling ("marquee") for truncated text — see utils/marquee.js */
+.marquee { display: block; max-width: 100%; overflow: hidden; white-space: nowrap; }
+.marquee-inner { display: inline-block; white-space: nowrap; will-change: transform; }
 .legend-line { width: 18px; height: 3px; border-radius: 2px; flex-shrink: 0; }
 .legend-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 
@@ -182,17 +188,31 @@
 }
 
 /* ── Popup ──────────────────────────────────────── */
-.maplibregl-popup { max-width: 300px; }
+.maplibregl-popup { max-width: 320px; }
 .maplibregl-popup-content {
-  padding: 12px 16px !important;
+  padding: 18px 22px 16px 18px !important;
   border-radius: var(--radius-sm) !important;
   box-shadow: var(--shadow) !important;
   font-size: 12px;
   border: 1px solid var(--border) !important;
 }
+.maplibregl-popup-close-button {
+  width: 26px; height: 26px;
+  top: 6px; right: 6px;
+  padding: 0;
+  font-size: 20px; line-height: 1;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  display: flex; align-items: center; justify-content: center;
+  transition: background var(--transition), color var(--transition);
+}
+.maplibregl-popup-close-button:hover { background: var(--surface); color: var(--text); }
 .maplibregl-popup-content strong { display: block; font-size: 13px; margin-bottom: 2px; }
 .popup-agency { color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 6px; display: block; }
 .popup-detail { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--text-secondary); }
+.popup-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 11px; color: var(--text-secondary); }
+.popup-row .popup-key { color: var(--text-muted); min-width: 46px; flex: none; }
+.popup-row .popup-val { font-weight: 600; color: var(--text); }
 .popup-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; background: var(--surface); color: var(--text-secondary); }
 
 /* ── Map Controls ───────────────────────────────── */
@@ -238,10 +258,17 @@
 .alert-item { display: inline-block; margin-right: 40px; }
 .arrivals-box {
   margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px;
+  /* Bounded width so long headsigns truncate (and therefore marquee-scroll)
+     instead of the popup auto-growing to fit them. */
+  width: 240px; max-width: 100%;
 }
 .arrivals-title { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--accent); margin-bottom: 4px; }
-.arrival-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 2px; }
+.arrival-row { display: flex; align-items: center; gap: 8px; font-size: 11px; margin-bottom: 3px; }
 .arrival-time { font-weight: 700; color: var(--online); }
+.arrival-row .popup-badge { flex: none; }
+.arrival-row .arr-time { font-weight: 700; color: var(--online); font-variant-numeric: tabular-nums; flex: none; }
+.arrival-row .arr-head { color: var(--text-secondary); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.popup-detail.badge-row { flex-wrap: wrap; gap: 4px; }
 
 @media (max-width: 768px) {
   #sidebar {

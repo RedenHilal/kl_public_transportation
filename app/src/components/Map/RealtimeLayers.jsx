@@ -3,16 +3,16 @@ import { useAnimatedRealtime } from '../../hooks/useAnimatedRealtime';
 
 // Realtime markers: big when zoomed out (where stop dots are hidden) and shrink as
 // you zoom in, converging to roughly a stop dot's size at the closest zoom.
-const DOT_RADIUS = ['interpolate', ['linear'], ['zoom'], 8, 14, 12, 10, 18, 9];
-const ARROW_SIZE = ['interpolate', ['linear'], ['zoom'], 8, 1.5, 12, 1.1, 18, 0.85];
+const ICON_SIZE = ['interpolate', ['linear'], ['zoom'], 8, 1.5, 12, 1.1, 18, 0.85];
 
-// Each agency draws two layers sharing one visibility toggle, driven by per-feature
-// props (set in App enrichment): a rotated colored ARROW when a heading is known
-// (current or last-known), or a colored DOT when none was ever reported.
+// One symbol layer per agency. Agencies that report a heading draw a rotated
+// colored ARROW; KTMB (no bearing data) draws a non-directional colored rounded
+// CHIP instead. Icon images (arrow_<hex> / chip_<hex>) are generated per route
+// color on demand in App's styleimagemissing handler.
 const AGENCIES = [
-  { agencyId: 'realtime-ktmb', name: 'ktmb' },
-  { agencyId: 'realtime-rapid-bus', name: 'rapid-bus' },
-  { agencyId: 'realtime-mrt-feeder', name: 'rapid-mrt' },
+  { agencyId: 'realtime-ktmb', name: 'ktmb', directional: false },
+  { agencyId: 'realtime-rapid-bus', name: 'rapid-bus', directional: true },
+  { agencyId: 'realtime-mrt-feeder', name: 'rapid-mrt', directional: true },
 ];
 
 const labelPaint = {
@@ -27,41 +27,23 @@ export function RealtimeLayers({ visibility, data }) {
 
   return (
     <Source id="realtime" type="geojson" data={fc}>
-      {AGENCIES.map(({ agencyId, name }) => {
-        const visible = visibility[agencyId] ? 'visible' : 'none';
-        const isAgency = ['==', ['get', 'agency_name'], name];
-        return [
-          <Layer
-            key={agencyId}
-            id={agencyId}
-            type="circle"
-            filter={['all', isAgency, ['!', ['get', 'hasHeading']]]}
-            layout={{ visibility: visible }}
-            paint={{
-              'circle-radius': DOT_RADIUS,
-              'circle-color': ['get', 'color'],
-              'circle-stroke-width': 2,
-              'circle-stroke-color': '#ffffff',
-              'circle-opacity': 0.9,
-            }}
-          />,
-          <Layer
-            key={`${agencyId}-arrow`}
-            id={`${agencyId}-arrow`}
-            type="symbol"
-            filter={['all', isAgency, ['get', 'hasHeading']]}
-            layout={{
-              visibility: visible,
-              'icon-image': ['get', 'arrowIcon'],
-              'icon-rotate': ['get', 'dirBearing'],
-              'icon-rotation-alignment': 'map',
-              'icon-allow-overlap': true,
-              'icon-ignore-placement': true,
-              'icon-size': ARROW_SIZE,
-            }}
-          />,
-        ];
-      })}
+      {AGENCIES.map(({ agencyId, name, directional }) => (
+        <Layer
+          key={agencyId}
+          id={agencyId}
+          type="symbol"
+          filter={['==', ['get', 'agency_name'], name]}
+          layout={{
+            visibility: visibility[agencyId] ? 'visible' : 'none',
+            'icon-image': directional ? ['get', 'arrowIcon'] : ['get', 'chipIcon'],
+            'icon-rotate': directional ? ['get', 'dirBearing'] : 0,
+            'icon-rotation-alignment': 'map',
+            'icon-allow-overlap': true,
+            'icon-ignore-placement': true,
+            'icon-size': ICON_SIZE,
+          }}
+        />
+      ))}
       <Layer
         id="rt-labels"
         type="symbol"
