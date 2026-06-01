@@ -346,6 +346,9 @@ function scheduleNext(cycleStart) {
 // FeatureCollection (public.get_realtime_geojson). The frontend renders this as
 // a single GeoJSON source instead of vector tiles, so vehicle positions are
 // consistent across zoom levels and don't flicker on refresh.
+// route geometry GeoJSON strings, keyed `${agency}::${route_short_name}` (static).
+const routeGeomCache = new Map();
+
 const HTTP_PORT = Number(process.env.HTTP_PORT) || 3001;
 const httpServer = http.createServer(async (req, res) => {
   const url = (req.url || '').split('?')[0];
@@ -411,6 +414,32 @@ const httpServer = http.createServer(async (req, res) => {
     } catch (err) {
       console.error('[GTFS-RT] /arrivals failed:', err.message);
       res.end(JSON.stringify({ stop_id: stopId, arrivals: [] }));
+    }
+    return;
+  }
+  // Full route geometry as GeoJSON, used by the frontend to animate live
+  // vehicles ALONG the route line (rather than straight-line between updates).
+  // Cached per agency+route (static geometry). KTMB has no geometry here.
+  if (url === '/route_geojson') {
+    const params = new URLSearchParams((req.url || '').split('?')[1] || '');
+    const agency = params.get('agency');
+    const route = params.get('route');
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' });
+    if (!agency || !route) { res.end('null'); return; }
+    const key = `${agency}::${route}`;
+    if (routeGeomCache.has(key)) { res.end(routeGeomCache.get(key)); return; }
+    try {
+      const { rows } = await pool.query(
+        `SELECT ST_AsGeoJSON(ST_Collect(geom)) AS g
+           FROM public.transit_routes WHERE agency = $1 AND route_short_name = $2`,
+        [agency, route]
+      );
+      const g = rows[0]?.g || 'null';
+      routeGeomCache.set(key, g);
+      res.end(g);
+    } catch (err) {
+      console.error('[GTFS-RT] /route_geojson failed:', err.message);
+      res.end('null');
     }
     return;
   }

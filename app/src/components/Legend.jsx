@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { AGENCY_LABELS } from '../constants/transit';
 import { legendColor, AGENCY_COLORS, STATION_COLOR } from '../constants/colors';
 import { autoScrollAll } from '../utils/marquee';
@@ -6,6 +6,9 @@ import { autoScrollAll } from '../utils/marquee';
 function Legend({ routeMetadata, visibility }) {
   const { routes } = routeMetadata || { routes: [] };
   const rootRef = useRef(null);
+  const [collapsed, setCollapsed] = useState(() =>
+    typeof window !== 'undefined' && window.innerWidth <= 768
+  );
 
   // Marquee any route names that overflow their row; re-measure on content/size change.
   useEffect(() => {
@@ -32,18 +35,23 @@ function Legend({ routeMetadata, visibility }) {
     if (!showRail && !showBus) return null;
 
     return (
-      <div id="legend">
-        {showRail && (
-          <div className="legend-row">
-            <span className="legend-line" style={{ background: AGENCY_COLORS['rapid-rail'] }} />
-            Rail Transit
-          </div>
-        )}
-        {showBus && (
-          <div className="legend-row">
-            <span className="legend-line" style={{ background: AGENCY_COLORS['rapid-bus'] }} />
-            Bus Routes
-          </div>
+      <div id="legend" ref={rootRef} className={collapsed ? 'collapsed' : ''}>
+        <LegendHeader collapsed={collapsed} onToggle={() => setCollapsed(prev => !prev)} />
+        {!collapsed && (
+          <>
+            {showRail && (
+              <div className="legend-row">
+                <span className="legend-line" style={{ background: AGENCY_COLORS['rapid-rail'] }} />
+                Rail Transit
+              </div>
+            )}
+            {showBus && (
+              <div className="legend-row">
+                <span className="legend-line" style={{ background: AGENCY_COLORS['rapid-bus'] }} />
+                Bus Routes
+              </div>
+            )}
+          </>
         )}
       </div>
     );
@@ -84,32 +92,47 @@ function Legend({ routeMetadata, visibility }) {
   if (Object.keys(grouped).length === 0 && !showStations) return null;
 
   return (
-    <div id="legend" ref={rootRef}>
-      <div className="legend-scroll-area">
-        {Object.entries(grouped).map(([agency, agencyItems]) => (
-          <div key={agency} className="legend-group">
-            <div className="legend-agency-title">{AGENCY_LABELS[agency] || agency}</div>
-            <div className="legend-routes-grid">
-              {agencyItems.map((item, i) => (
-                <div className="legend-row small" key={i} title={item.names.join(', ')}>
-                  <span className="legend-line" style={{ background: item.color }} />
-                  <span className="route-name">
-                    <span className="marquee"><span className="marquee-inner">{item.names.join(', ')}</span></span>
-                  </span>
+    <div id="legend" ref={rootRef} className={collapsed ? 'collapsed' : ''}>
+      <LegendHeader collapsed={collapsed} onToggle={() => setCollapsed(prev => !prev)} />
+      {!collapsed && (
+        <>
+          <div className="legend-scroll-area">
+            {Object.entries(grouped).map(([agency, agencyItems]) => (
+              <div key={agency} className="legend-group">
+                <div className="legend-agency-title">{AGENCY_LABELS[agency] || agency}</div>
+                <div className="legend-routes-grid">
+                  {agencyItems.map((item, i) => (
+                    <div className="legend-row small" key={i} title={item.names.join(', ')}>
+                      <span className="legend-line" style={{ background: item.color }} />
+                      <span className="route-name">
+                        <span className="marquee"><span className="marquee-inner">{item.names.join(', ')}</span></span>
+                      </span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-      {showStations && (
-        <div className="legend-fixed-footer">
-           <div className="legend-row">
-              <span className="legend-dot" style={{ background: STATION_COLOR }} />
-              Stations
-           </div>
-        </div>
+          {showStations && (
+            <div className="legend-fixed-footer">
+               <div className="legend-row">
+                  <span className="legend-dot" style={{ background: STATION_COLOR }} />
+                  Stations
+               </div>
+            </div>
+          )}
+        </>
       )}
+    </div>
+  );
+}
+
+function LegendHeader({ collapsed, onToggle }) {
+  return (
+    <div className="legend-header" onClick={onToggle} role="button" tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}>
+      <span>Legend</span>
+      <span className={`legend-chevron${collapsed ? '' : ' open'}`}>&#9660;</span>
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { ServiceAlerts } from './components/ServiceAlerts';
 import { RealtimeLayers } from './components/Map/RealtimeLayers';
 import { Toast } from './components/Toast';
 import { useRouteMetadata } from './hooks/useRouteMetadata';
+import { useRouteGeometry } from './hooks/useRouteGeometry';
 import { useRealtime } from './hooks/useRealtime';
 import { LAYER_DEFS, INTERACTIVE_LAYERS, ASSET_MAP, AGENCY_LABELS } from './constants/transit';
 import { MARTIN_URL, ARRIVALS_URL } from './constants/config';
@@ -87,6 +88,7 @@ function App() {
   const [mapLoaded, setMapLoaded] = useState(false);
   const mapInstanceRef = useRef(null);
   const clickSeq = useRef(0); // guards async arrivals fetch against later clicks
+  const getParts = useRouteGeometry();
   const routeMetadata = useRouteMetadata(mapLoaded ? mapInstanceRef.current : null);
 
   // Live fleet GeoJSON + per-feed status (for empty/unavailable detection).
@@ -429,7 +431,7 @@ function App() {
           <Source id="stops" type="vector" tiles={[`${MARTIN_URL}/transit_stops/{z}/{x}/{y}`]} minzoom={8} maxzoom={20} />
           
           {layerComponents}
-          <RealtimeLayers visibility={visibility} data={enrichedRealtime} />
+          <RealtimeLayers visibility={visibility} data={enrichedRealtime} getParts={getParts} />
 
           {popupInfo && (
             <Popup longitude={popupInfo.lngLat.lng} latitude={popupInfo.lngLat.lat} onClose={() => setPopupInfo(null)} anchor="top">

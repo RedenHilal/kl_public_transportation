@@ -1,6 +1,20 @@
-.env
+.env*
+!.env.example
 deploy.sh
+dist/
+*.local
+*.log
+
+# IDE / editor
 .vscode
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
 node_modules/
 
 # Claude

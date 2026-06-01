@@ -21,9 +21,9 @@ const labelPaint = {
   'text-halo-width': 1.5,
 };
 
-export function RealtimeLayers({ visibility, data }) {
+export function RealtimeLayers({ visibility, data, getParts }) {
   // Smoothly interpolate positions between updates (only this subtree re-renders).
-  const fc = useAnimatedRealtime(data);
+  const fc = useAnimatedRealtime(data, getParts);
 
   return (
     <Source id="realtime" type="geojson" data={fc}>

@@ -45,36 +45,52 @@ function Sidebar({
   onRouteClick,
   highlightedRoute
 }) {
-  const [dragY, setDragY] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
   const [sheetState, setSheetState] = useState('collapsed'); // collapsed, peek, expanded
+  const [isDragging, setIsDragging] = useState(false);
   const startY = useRef(0);
+  const lastDelta = useRef(0);
+  const sheetEl = useRef(null);
 
   const { routes } = routeMetadata || { routes: [] };
 
+  // Imperative drag: track the finger relative to the current state's base offset,
+  // so the sheet follows the finger from its actual position (not from 0). Only
+  // touches the DOM, no per-frame re-render. On release, snap to the nearest state
+  // and clear the inline transform, letting the CSS transition take over.
   const handleTouchStart = (e) => {
     startY.current = e.touches[0].clientY;
+    lastDelta.current = 0;
     setIsDragging(true);
   };
 
   const handleTouchMove = (e) => {
     if (!isDragging) return;
-    const delta = e.touches[0].clientY - startY.current;
-    // Allow dragging up from collapsed/peek, but limit downward dragging
-    if (sheetState === 'collapsed' && delta > 0) return;
-    setDragY(delta);
+    const el = sheetEl.current;
+    if (!el) return;
+    lastDelta.current = e.touches[0].clientY - startY.current;
+    // Don't pull further down than the collapsed position.
+    const h = el.clientHeight;
+    const base = (() => {
+      switch (sheetState) {
+        case 'expanded': return 0;
+        case 'peek': return h - 240;
+        default: return h - 54;
+      }
+    })();
+    const y = Math.max(0, Math.min(base + lastDelta.current, h - 54));
+    el.style.transform = `translateY(${y}px)`;
   };
 
   const handleTouchEnd = () => {
     setIsDragging(false);
-    const threshold = 80;
-    
-    if (dragY < -threshold) {
+    const el = sheetEl.current;
+    if (el) el.style.transform = '';
+    const threshold = 60;
+    if (lastDelta.current < -threshold) {
       setSheetState(prev => prev === 'collapsed' ? 'peek' : 'expanded');
-    } else if (dragY > threshold) {
+    } else if (lastDelta.current > threshold) {
       setSheetState(prev => prev === 'expanded' ? 'peek' : 'collapsed');
     }
-    setDragY(0);
   };
 
   const getAgencyColors = (agency) => {
@@ -84,9 +100,8 @@ function Sidebar({
   };
 
   return (
-    <div id="sidebar" 
+    <div id="sidebar" ref={sheetEl}
       className={`state-${sheetState}${isDragging ? ' dragging' : ''}`}
-      style={isDragging ? { transform: `translateY(${dragY}px)` } : {}}
     >
       <div id="sidebar-header" 
         onTouchStart={handleTouchStart}
